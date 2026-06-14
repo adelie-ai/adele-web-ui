@@ -1,6 +1,10 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/server"]
+
+# The Leptos SPA crate (crates/web) is added once client-ui-common is wasm-clean
+# (see the protocol-extraction issue). It builds for wasm32-unknown-unknown via Trunk
+# and is intentionally kept out of the native workspace default build.
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +12,19 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/adelie-ai/adele-web-ui"
 
-# The Leptos SPA crate (crates/web) is added once client-ui-common is wasm-clean
-# (see the protocol-extraction issue). It builds for wasm32-unknown-unknown via Trunk
-# and is intentionally kept out of the native workspace default build.
+# Warnings are failures, enforced by the compiler. Members inherit via
+# `[lints] workspace = true`. (Cross-project standard — see AGENTS.md.)
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
