@@ -22,9 +22,22 @@ all = "deny"
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+# desktop-assistant crates consumed by the BFF. Path-deps via `../desktop-assistant`
+# resolve to the primary checkout normally, and to the `.worktrees/adele-web-ui/
+# desktop-assistant` symlink when building from a worktree (same pattern as gtk).
+# client-common drops its default `dbus` feature — the BFF reaches the daemon over UDS.
+desktop-assistant-application = { path = "../desktop-assistant/crates/application" }
+desktop-assistant-ws = { path = "../desktop-assistant/crates/ws-interface" }
+desktop-assistant-client-common = { path = "../desktop-assistant/crates/client-common", default-features = false }
+desktop-assistant-api-model = { path = "../desktop-assistant/crates/api-model" }
+desktop-assistant-auth-jwt = { path = "../desktop-assistant/crates/auth-jwt" }
