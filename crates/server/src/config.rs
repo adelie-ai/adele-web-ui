@@ -35,7 +35,11 @@ pub struct BffConfig {
     /// UDS socket to the daemon. `None` resolves to the platform default.
     pub uds_socket: Option<PathBuf>,
     /// Local JWT minter socket — the BFF mints a fresh daemon token per connect
-    /// (peer-UID authenticated). `None` connects without minting.
+    /// (peer-UID authenticated), e.g. `$XDG_RUNTIME_DIR/adelie/mint.sock`. In
+    /// practice this is **required**: the daemon's UDS front door still demands a
+    /// bearer token, so with `None` the Connector fails to authenticate ("no JWT
+    /// provided") unless a token is supplied another way. Set it to the daemon's
+    /// minter socket. (Verified live 2026-06-14.)
     pub minter_socket: Option<PathBuf>,
 }
 
