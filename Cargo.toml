@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/adelie-ai/adele-web-ui"
+
+# The Leptos SPA crate (crates/web) is added once client-ui-common is wasm-clean
+# (see the protocol-extraction issue). It builds for wasm32-unknown-unknown via Trunk
+# and is intentionally kept out of the native workspace default build.
