@@ -45,15 +45,14 @@ async fn main() -> anyhow::Result<()> {
     let signing_key = ensure_signing_key_at(&default_signing_key_path())
         .context("loading/creating the JWT signing key")?;
 
-    // Back door: a long-lived Connector to the daemon over UDS. Over UDS the
-    // daemon authenticates this process by peer credentials (optionally minting
-    // a token via `minter_socket`).
-    let mut conn_config = ConnectionConfig {
+    // Back door: a long-lived Connector to the daemon over UDS. The daemon
+    // authenticates this process by kernel peer-cred (desktop-assistant#407) —
+    // no token is minted; the handshake is tokenless.
+    let conn_config = ConnectionConfig {
         transport_mode: TransportMode::Uds,
+        socket_path: config.uds_socket.clone(),
         ..ConnectionConfig::default()
     };
-    conn_config.socket_path = config.uds_socket.clone();
-    conn_config.minter_socket = config.minter_socket.clone();
     let connector = Connector::connect(&conn_config)
         .await
         .context("connecting to the assistant daemon over UDS")?;
@@ -61,12 +60,22 @@ async fn main() -> anyhow::Result<()> {
     let handler = Arc::new(ForwardingHandler::new(Arc::new(connector)));
 
     // Front door: reuse the daemon's ws-interface server (/ws, /login, /auth/config).
-    let validator: Arc<dyn WsAuthValidator> = Arc::new(JwtValidator::new(signing_key.clone()));
+    // The browser-token `iss`/`aud` are config-resolved (default: hostname /
+    // "<user>.adelie-ai") and shared by the validator + login so they can't drift.
+    let issuer = config.issuer();
+    let audience = config.audience();
+    let validator: Arc<dyn WsAuthValidator> = Arc::new(JwtValidator::new(
+        signing_key.clone(),
+        issuer.clone(),
+        audience.clone(),
+    ));
     let login: Option<Arc<dyn WsLoginService>> = config.login_password.clone().map(|password| {
         Arc::new(PasswordLogin::new(
             config.login_username.clone(),
             password,
             signing_key.clone(),
+            issuer.clone(),
+            audience.clone(),
         )) as Arc<dyn WsLoginService>
     });
     if login.is_none() {

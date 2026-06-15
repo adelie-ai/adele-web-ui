@@ -34,13 +34,14 @@ pub struct BffConfig {
     pub login_password: Option<String>,
     /// UDS socket to the daemon. `None` resolves to the platform default.
     pub uds_socket: Option<PathBuf>,
-    /// Local JWT minter socket — the BFF mints a fresh daemon token per connect
-    /// (peer-UID authenticated), e.g. `$XDG_RUNTIME_DIR/adelie/mint.sock`. In
-    /// practice this is **required**: the daemon's UDS front door still demands a
-    /// bearer token, so with `None` the Connector fails to authenticate ("no JWT
-    /// provided") unless a token is supplied another way. Set it to the daemon's
-    /// minter socket. (Verified live 2026-06-14.)
-    pub minter_socket: Option<PathBuf>,
+    /// JWT `iss` for the browser session tokens the BFF issues + validates.
+    /// `None`/empty ⇒ the local hostname. Mirrors the daemon's
+    /// `[ws_auth.hs256].issuer`; the BFF validates its own tokens, so this just
+    /// has to be self-consistent (issue == validate, which it is by construction).
+    pub issuer: Option<String>,
+    /// JWT `aud` for browser session tokens. `None`/empty ⇒ `"<user>.adelie-ai"`
+    /// (mirrors the daemon's `[ws_auth.hs256].audience`).
+    pub audience: Option<String>,
 }
 
 impl Default for BffConfig {
@@ -53,15 +54,67 @@ impl Default for BffConfig {
             login_username: "adele".to_string(),
             login_password: None,
             uds_socket: None,
-            minter_socket: None,
+            issuer: None,
+            audience: None,
         }
     }
+}
+
+/// Best-effort local hostname for the default token `iss`. Dependency-free
+/// (kernel hostname → `/etc/hostname` → `$HOSTNAME`), mirroring the daemon's
+/// resolver; falls back to a fixed label so a token always has an issuer.
+fn local_hostname() -> String {
+    let from_file = |path: &str| {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    from_file("/proc/sys/kernel/hostname")
+        .or_else(|| from_file("/etc/hostname"))
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "adele-web-ui.local".to_string())
+}
+
+/// A trimmed, non-empty copy of `value`, or `None` — so a blank config string
+/// falls back to the default rather than becoming the literal `iss`/`aud`.
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The OS username for the default token `aud` (`"<user>.adelie-ai"`).
+fn current_username() -> String {
+    std::env::var("USER")
+        .ok()
+        .or_else(|| std::env::var("LOGNAME").ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "desktop-user".to_string())
 }
 
 impl BffConfig {
     /// Resolve the bind `SocketAddr` from `bind_address` + `port`.
     pub fn socket_addr(&self) -> anyhow::Result<SocketAddr> {
         Ok(format!("{}:{}", self.bind_address, self.port).parse()?)
+    }
+
+    /// Resolve the token `iss`: the configured value, else the local hostname.
+    pub fn issuer(&self) -> String {
+        non_empty(self.issuer.as_deref()).unwrap_or_else(local_hostname)
+    }
+
+    /// Resolve the token `aud`: the configured value, else `"<user>.adelie-ai"`.
+    pub fn audience(&self) -> String {
+        non_empty(self.audience.as_deref())
+            .unwrap_or_else(|| format!("{}.adelie-ai", current_username()))
     }
 
     /// Load from `path`, falling back to defaults when the file is absent.
