@@ -13,6 +13,7 @@ dependencies = [
  "client-ui-common",
  "console_error_panic_hook",
  "desktop-assistant-api-model",
+ "futures",
  "gloo-net",
  "gloo-storage",
  "gloo-timers",

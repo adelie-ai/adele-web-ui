@@ -7,11 +7,16 @@
 
 #[cfg(target_arch = "wasm32")]
 mod app;
+#[cfg(target_arch = "wasm32")]
+mod auth;
+#[cfg(target_arch = "wasm32")]
+mod engine;
+#[cfg(target_arch = "wasm32")]
+mod transport;
 
-// Pure wire-protocol mapping (`api::Event` -> `UiMessage`, frame round-trips).
-// Test-only for now; it gains a `target_arch = "wasm32"` arm when the transport
-// that consumes it lands, so the wasm build never carries unused code.
-#[cfg(test)]
+// Pure wire-protocol mapping (`api::Event` -> `UiMessage`, frame round-trips):
+// consumed by the transport on wasm, and unit-tested on the host.
+#[cfg(any(target_arch = "wasm32", test))]
 mod wire;
 
 fn main() {
