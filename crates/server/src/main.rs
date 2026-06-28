@@ -11,6 +11,7 @@
 mod auth;
 mod config;
 mod forward;
+mod ws_auth;
 
 use std::sync::Arc;
 
@@ -86,7 +87,13 @@ async fn main() -> anyhow::Result<()> {
         .with_login_service(login)
         .with_allowed_origins(config.allowed_origins.clone())
         .into_router()
-        .route("/healthz", get(|| async { "ok" }));
+        .route("/healthz", get(|| async { "ok" }))
+        // Browser WS-auth bridge: relay a `Sec-WebSocket-Protocol` bearer token
+        // into the `Authorization` header the embedded ws router validates.
+        // No-op for native (header-bearing) clients and non-`/ws` routes.
+        .layer(axum::middleware::from_fn(
+            ws_auth::inject_bearer_from_subprotocol,
+        ));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "adele-web-ui listening (BFF: /ws, /login, /auth/config, /healthz)");
