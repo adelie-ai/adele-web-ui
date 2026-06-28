@@ -10,25 +10,33 @@ default:
 # Full local gate: formatting, lints, build, tests (on the pinned toolchain)
 check: fmt-check lint build test
 
-# Verify formatting without modifying files
+# Verify formatting without modifying files (native workspace + the wasm SPA)
 fmt-check:
     cargo fmt --check
+    @if [ -d crates/web ]; then cargo fmt --manifest-path crates/web/Cargo.toml --check; fi
 
 # Apply formatting
 fmt:
     cargo fmt
+    @if [ -d crates/web ]; then cargo fmt --manifest-path crates/web/Cargo.toml; fi
 
-# Clippy; warnings are errors
+# Clippy; warnings are errors. Native workspace (the BFF), then the wasm SPA on
+# its own target (separate workspace — clippy compiles it, catching wasm build
+# breaks without needing trunk).
 lint:
     cargo clippy --all-targets -- -D warnings
+    @if [ -d crates/web ]; then cargo clippy --manifest-path crates/web/Cargo.toml --target wasm32-unknown-unknown -- -D warnings; fi
 
 # Build the native workspace (the axum BFF server)
 build:
     cargo build
 
-# Run the test suite (excludes #[ignore] integration tests)
+# Run the test suite. Native workspace, then the SPA's pure protocol/mapping
+# modules (the wasm-only UI is excluded from the host build; its serde + Event→
+# UiMessage logic is `#[cfg(test)]`-compiled and run natively here).
 test:
     cargo test
+    @if [ -d crates/web ]; then cargo test --manifest-path crates/web/Cargo.toml; fi
 
 # Build the Leptos wasm SPA (requires trunk + the wasm target). Enabled once
 # crates/web lands (blocked on client-ui-common being wasm-clean). Until then

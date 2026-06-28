@@ -1,0 +1,25 @@
+# Trunk build/serve config for the Adele web SPA.
+#
+# In production the BFF serves these static assets on `/`, so the SPA and the
+# API (`/ws`, `/login`, `/auth/config`) share an origin — no proxy involved.
+# For local dev, `trunk serve` hosts the SPA and proxies those API paths to a
+# locally-running BFF so the browser still talks same-origin (and the BFF's
+# Origin allowlist just needs to include the trunk dev origin).
+
+[build]
+target = "index.html"
+
+[serve]
+address = "127.0.0.1"
+port = 8080
+
+# --- Dev proxies to the BFF (default bind 127.0.0.1:9379) ---------------------
+[[proxy]]
+backend = "http://127.0.0.1:9379/ws"
+ws = true
+
+[[proxy]]
+backend = "http://127.0.0.1:9379/login"
+
+[[proxy]]
+backend = "http://127.0.0.1:9379/auth/config"

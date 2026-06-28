@@ -1,10 +1,13 @@
 [workspace]
 resolver = "3"
 members = ["crates/server"]
-
-# The Leptos SPA crate (crates/web) is added once client-ui-common is wasm-clean
-# (see the protocol-extraction issue). It builds for wasm32-unknown-unknown via Trunk
-# and is intentionally kept out of the native workspace default build.
+# crates/web (the Leptos wasm SPA) is its OWN workspace, excluded here so the
+# native gate — `cargo build`, `cargo clippy --all-targets`, `cargo test` — never
+# pulls wasm/CSR deps (leptos, gloo) or tries to build them for the host target.
+# It builds for wasm32-unknown-unknown via Trunk (`just build-web`); `just check`
+# still fmt-checks, clippy-checks (wasm target), and native-tests it. See
+# crates/web/Cargo.toml.
+exclude = ["crates/web"]
 
 [workspace.package]
 version = "0.1.0"

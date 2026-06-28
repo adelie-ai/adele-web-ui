@@ -1,0 +1,50 @@
+/* Mobile-first base. Real component styling lands with the chat/login screens;
+   this is just a legible, touch-friendly shell that respects the safe area and
+   the user's light/dark preference. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #14171a;
+  --muted: #5b6770;
+  --accent: #2f6feb;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --fg: #e8eaed;
+    --muted: #9aa4ad;
+    --accent: #6ea1ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.app-shell {
+  min-height: 100%;
+  padding: max(16px, var(--safe-top)) 16px max(16px, var(--safe-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.muted {
+  color: var(--muted);
+}
