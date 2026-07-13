@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adele-web-ui
+  namespace: adele-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adele-web-ui
+  template:
+    metadata:
+      labels:
+        app: adele-web-ui
+    spec:
+      # Run non-root; fsGroup makes the emptyDir (for the per-pod JWT signing
+      # key) writable by the pod user.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: web-ui
+          # Replace with the image you built and pushed (see deploy/k8s/README.md).
+          # This is a PLACEHOLDER registry — never commit the real one.
+          image: registry.example.com:5000/adele/adele-web-ui:REPLACE_ME
+          imagePullPolicy: Always # mutable tag; re-pull on rollout
+          ports:
+            - containerPort: 9379
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: ADELE_WEB_UI_ENABLED
+              value: "true"
+            - name: ADELE_WEB_UI_BIND_ADDRESS
+              value: "0.0.0.0"
+            - name: ADELE_WEB_UI_PORT
+              value: "9379"
+            # Browser Origin allowlist. For `kubectl port-forward svc/adele-web-ui
+            # 9379:9379` the SPA is loaded same-origin, so the WS/`/login` Origin
+            # is one of these. Add your Tailscale MagicDNS origin (e.g.
+            # http://<host>.<tailnet>.ts.net:9379) to reach it over the tailnet.
+            - name: ADELE_WEB_UI_ALLOWED_ORIGINS
+              value: "http://localhost:9379,http://127.0.0.1:9379"
+            # Browser front-door login (POST /login, HTTP Basic). Reuses the same
+            # shared password Secret as the daemon for a single credential.
+            - name: ADELE_WEB_UI_LOGIN_USERNAME
+              value: "adele"
+            - name: ADELE_WEB_UI_LOGIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: adele-secrets
+                  key: WS_LOGIN_PASSWORD
+            # Back door → the in-cluster daemon over WebSocket (`/login` auth).
+            - name: ADELE_WEB_UI_DAEMON_TRANSPORT
+              value: "ws"
+            - name: ADELE_WEB_UI_DAEMON_WS_URL
+              value: "ws://adele-daemon:11339/ws"
+            - name: ADELE_WEB_UI_DAEMON_WS_USERNAME
+              value: "adele"
+            - name: ADELE_WEB_UI_DAEMON_WS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: adele-secrets
+                  key: WS_LOGIN_PASSWORD
+          volumeMounts:
+            # Per-pod HS256 signing key for browser session tokens lives under
+            # $XDG_DATA_HOME (/home/appuser/.local/share). An emptyDir keeps the
+            # rootfs read-mostly and regenerates the key on restart (users just
+            # re-login) — acceptable for this single-user LAN service. Swap for a
+            # PVC if you want tokens to survive a pod restart.
+            - name: data
+              mountPath: /home/appuser/.local/share
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9379
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9379
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adele-web-ui
+  namespace: adele-test
+spec:
+  selector:
+    app: adele-web-ui
+  ports:
+    - port: 9379
+      targetPort: 9379

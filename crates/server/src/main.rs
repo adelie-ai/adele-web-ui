@@ -20,9 +20,10 @@ use axum::routing::get;
 use desktop_assistant_auth_jwt::{default_signing_key_path, ensure_signing_key_at};
 use desktop_assistant_client_common::{ConnectionConfig, Connector, TransportMode};
 use desktop_assistant_ws::{WsAuthValidator, WsLoginService, WsServeConfig};
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{JwtValidator, PasswordLogin};
-use crate::config::BffConfig;
+use crate::config::{BffConfig, DaemonTransport};
 use crate::forward::ForwardingHandler;
 
 #[tokio::main]
@@ -33,7 +34,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = BffConfig::load(&BffConfig::default_path())?;
+    let mut config = BffConfig::load(&BffConfig::default_path())?;
+    // Env (`ADELE_WEB_UI_*`) overlays the TOML so a container / systemd unit can
+    // configure the service with no config file. Env wins over file.
+    config.apply_env_overrides();
     if !config.enabled {
         tracing::info!(
             "adele-web-ui is disabled in config; exiting. Enable it (via the KCM) to run."
@@ -46,17 +50,42 @@ async fn main() -> anyhow::Result<()> {
     let signing_key = ensure_signing_key_at(&default_signing_key_path())
         .context("loading/creating the JWT signing key")?;
 
-    // Back door: a long-lived Connector to the daemon over UDS. The daemon
-    // authenticates this process by kernel peer-cred (desktop-assistant#407) —
-    // no token is minted; the handshake is tokenless.
-    let conn_config = ConnectionConfig {
-        transport_mode: TransportMode::Uds,
-        socket_path: config.uds_socket.clone(),
-        ..ConnectionConfig::default()
+    // Back door: a long-lived Connector to the daemon. Two ways in:
+    //  * UDS (default) — a co-located daemon authenticates this process by kernel
+    //    peer-cred (desktop-assistant#407); no token is minted (tokenless).
+    //  * WS — a remote daemon (e.g. on k8s); auth is the daemon's `/login`
+    //    password exchange (or a pre-minted `daemon_ws_jwt`). Mirrors the tui/gtk
+    //    `ConnectionConfig`. `tls_ca_cert` (default) is unused for `ws://`.
+    let (conn_config, back_door) = match config.daemon_transport {
+        DaemonTransport::Uds => (
+            ConnectionConfig {
+                transport_mode: TransportMode::Uds,
+                socket_path: config.uds_socket.clone(),
+                ..ConnectionConfig::default()
+            },
+            "UDS".to_string(),
+        ),
+        DaemonTransport::Ws => {
+            let ws_url = config.daemon_ws_url.clone().context(
+                "daemon_transport = ws requires daemon_ws_url (ADELE_WEB_UI_DAEMON_WS_URL)",
+            )?;
+            let back_door = format!("WS {ws_url}");
+            (
+                ConnectionConfig {
+                    transport_mode: TransportMode::Ws,
+                    ws_url,
+                    ws_login_username: config.daemon_ws_username.clone(),
+                    ws_login_password: config.daemon_ws_password.clone(),
+                    ws_jwt: config.daemon_ws_jwt.clone(),
+                    ..ConnectionConfig::default()
+                },
+                back_door,
+            )
+        }
     };
     let connector = Connector::connect(&conn_config)
         .await
-        .context("connecting to the assistant daemon over UDS")?;
+        .with_context(|| format!("connecting to the assistant daemon over {back_door}"))?;
     tracing::info!(daemon = connector.label(), "connected to daemon");
     let handler = Arc::new(ForwardingHandler::new(Arc::new(connector)));
 
@@ -83,17 +112,35 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("no login_password configured — POST /login will not issue tokens");
     }
 
-    let app = WsServeConfig::new(handler, validator)
+    let mut app = WsServeConfig::new(handler, validator)
         .with_login_service(login)
         .with_allowed_origins(config.allowed_origins.clone())
         .into_router()
-        .route("/healthz", get(|| async { "ok" }))
-        // Browser WS-auth bridge: relay a `Sec-WebSocket-Protocol` bearer token
-        // into the `Authorization` header the embedded ws router validates.
-        // No-op for native (header-bearing) clients and non-`/ws` routes.
-        .layer(axum::middleware::from_fn(
-            ws_auth::inject_bearer_from_subprotocol,
-        ));
+        .route("/healthz", get(|| async { "ok" }));
+
+    // Static SPA at `/`, mounted as the router fallback so it never shadows the
+    // API routes (`/ws`, `/login`, `/auth/config`, `/healthz`). Unknown paths
+    // fall back to `index.html` for client-side routing. If the dir is absent we
+    // log and skip — the BFF still serves its API (do NOT crash).
+    let web_dir = config.web_dir();
+    if web_dir.is_dir() {
+        let serve_dir =
+            ServeDir::new(&web_dir).fallback(ServeFile::new(web_dir.join("index.html")));
+        app = app.fallback_service(serve_dir);
+        tracing::info!(dir = %web_dir.display(), "serving SPA static assets at /");
+    } else {
+        tracing::warn!(
+            dir = %web_dir.display(),
+            "SPA asset dir not found — serving API only (no static UI at /)"
+        );
+    }
+
+    // Browser WS-auth bridge: relay a `Sec-WebSocket-Protocol` bearer token into
+    // the `Authorization` header the embedded ws router validates. No-op for
+    // native (header-bearing) clients and non-`/ws` routes.
+    let app = app.layer(axum::middleware::from_fn(
+        ws_auth::inject_bearer_from_subprotocol,
+    ));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "adele-web-ui listening (BFF: /ws, /login, /auth/config, /healthz)");
