@@ -77,6 +77,13 @@ async fn main() -> anyhow::Result<()> {
                     ws_login_username: config.daemon_ws_username.clone(),
                     ws_login_password: config.daemon_ws_password.clone(),
                     ws_jwt: config.daemon_ws_jwt.clone(),
+                    // No custom CA: a plain `ws://` back door needs none, and for
+                    // `wss://` reqwest/tungstenite fall back to the system roots.
+                    // The default `Some(<XDG>/…/ca.pem)` would force reading a
+                    // daemon CA file that doesn't exist in the container (and the
+                    // in-cluster daemon runs `ws://`, TLS off). A self-signed
+                    // `wss://` CA would be a follow-up env var.
+                    tls_ca_cert: None,
                     ..ConnectionConfig::default()
                 },
                 back_door,
