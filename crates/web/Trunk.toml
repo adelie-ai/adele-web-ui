@@ -14,8 +14,21 @@ address = "127.0.0.1"
 port = 8080
 
 # --- Dev proxies to the BFF (default bind 127.0.0.1:9379) ---------------------
+# The WebSocket proxy backend must use the `ws://` scheme (not `http://`): with
+# `ws = true` Trunk dials the backend as a WebSocket and rejects a non-ws scheme
+# (`UnsupportedUrlScheme`). The HTTP proxies below stay `http://`.
+#
+# CAVEAT (dev only): Trunk's WebSocket proxy does not relay the server-selected
+# `Sec-WebSocket-Protocol` back to the browser. Auth here rides a subprotocol
+# (`adele.bearer, <jwt>`; see transport.rs / server ws_auth.rs), and the BFF
+# echoes `adele.bearer` on its 101 — but Trunk drops it downstream. Spec-
+# compliant browsers still open the socket (a missing echo means "no subprotocol
+# selected", RFC 6455 §4.1) and the SPA never inspects `ws.protocol`, so the
+# chat works; strict clients (Node's undici) reject it. For an end-to-end
+# login+chat test that doesn't depend on browser leniency, serve the built
+# `dist/` from the BFF directly (same origin, the production path — no proxy).
 [[proxy]]
-backend = "http://127.0.0.1:9379/ws"
+backend = "ws://127.0.0.1:9379/ws"
 ws = true
 
 [[proxy]]
