@@ -20,9 +20,16 @@ use client_ui_common::ContextUsageView;
 /// — appending `", compacting"` while a windowing/compaction pass is active.
 /// The percentage comes from the shared [`ContextUsageView::fraction`] so the
 /// spoken and shown numbers can never drift apart.
-pub fn aria_label(_usage: &ContextUsageView) -> String {
-    // Spec stub — replaced by the implementation commit.
-    String::new()
+pub fn aria_label(usage: &ContextUsageView) -> String {
+    let pct = (usage.fraction() * 100.0).round() as u64;
+    let mut label = format!(
+        "Context window {pct}% full, {} of {} tokens",
+        usage.used_tokens, usage.budget_tokens
+    );
+    if usage.compaction_active {
+        label.push_str(", compacting");
+    }
+    label
 }
 
 /// Fill width for the progress bar, an integer percent clamped to `0..=100`.
@@ -31,9 +38,55 @@ pub fn aria_label(_usage: &ContextUsageView) -> String {
 /// past budget); the bar caps at full so it never paints past its track — the
 /// red colour bucket ([`ContextFillLevel::Red`](client_ui_common::ContextFillLevel))
 /// is what signals the overflow, not a bar wider than 100%.
-pub fn bar_percent(_usage: &ContextUsageView) -> u8 {
-    // Spec stub — replaced by the implementation commit.
-    0
+pub fn bar_percent(usage: &ContextUsageView) -> u8 {
+    (usage.fraction() * 100.0).round().clamp(0.0, 100.0) as u8
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use view::context_usage_bar;
+
+#[cfg(target_arch = "wasm32")]
+mod view {
+    use leptos::prelude::*;
+
+    use super::{aria_label, bar_percent};
+    use crate::engine::ViewSignals;
+
+    /// Slim context-window fill indicator, shown just above the composer once a
+    /// turn on the viewed conversation reports usage. It stays hidden (zero
+    /// footprint) before the first turn and right after a conversation switch,
+    /// so it never crowds the phone chat header. The readout, percentage, and
+    /// colour bucket all come from the shared [`ContextUsageView`]
+    /// (client-ui-common, DA#341) — this only lays them out. `role="status"` +
+    /// `aria-live="polite"` announce the fill to assistive tech as it updates
+    /// each turn, using the spelled-out [`super::aria_label`] rather than the
+    /// symbol-laden visible readout.
+    ///
+    /// [`ContextUsageView`]: client_ui_common::ContextUsageView
+    pub fn context_usage_bar(view: ViewSignals) -> impl IntoView {
+        move || {
+            view.context_usage.get().map(|usage| {
+                let label = aria_label(&usage);
+                view! {
+                    <div
+                        class=format!("context-usage {}", usage.level().css_class())
+                        role="status"
+                        aria-live="polite"
+                        aria-label=label.clone()
+                        title=label
+                    >
+                        <div class="context-bar">
+                            <div
+                                class="context-bar-fill"
+                                style=format!("width:{}%", bar_percent(&usage))
+                            ></div>
+                        </div>
+                        <span class="context-readout">{usage.readout()}</span>
+                    </div>
+                }
+            })
+        }
+    }
 }
 
 #[cfg(test)]
