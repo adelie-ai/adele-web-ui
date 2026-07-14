@@ -43,6 +43,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use desktop_assistant_api_model as api;
+use desktop_assistant_client_common::Connector;
 use tokio::sync::{mpsc, watch};
 
 /// How many times [`run_forwarder`] re-attempts the reconnect re-send before
@@ -73,8 +75,23 @@ impl UnionTracker {
     /// unsubscribed from all, or disconnected) and return the recomputed union,
     /// sorted and de-duplicated so it is a stable, comparable value.
     pub fn apply(&self, session_id: &str, conversation_ids: &[String]) -> Vec<String> {
-        let _ = (session_id, conversation_ids);
-        todo!("spec: implemented in the following commit")
+        let mut per_session = self.per_session.lock().expect("UnionTracker poisoned");
+        if conversation_ids.is_empty() {
+            per_session.remove(session_id);
+        } else {
+            per_session.insert(
+                session_id.to_string(),
+                conversation_ids.iter().cloned().collect(),
+            );
+        }
+        // BTreeSet gives a sorted, de-duplicated union across all sessions.
+        per_session
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -85,6 +102,34 @@ impl UnionTracker {
 pub trait SubscriptionSink: Send + Sync {
     /// Set-replace the BFF connection's subscribed conversations on the daemon.
     async fn send_union(&self, conversation_ids: Vec<String>) -> Result<()>;
+}
+
+/// Production [`SubscriptionSink`]: issues `Command::SubscribeConversations` on
+/// the BFF's daemon [`Connector`]. `SubscribeConversations` is set-replace, so
+/// sending the full union each time is exactly right.
+pub struct ConnectorSubscriptionSink {
+    connector: Arc<Connector>,
+}
+
+impl ConnectorSubscriptionSink {
+    pub fn new(connector: Arc<Connector>) -> Self {
+        Self { connector }
+    }
+}
+
+#[async_trait]
+impl SubscriptionSink for ConnectorSubscriptionSink {
+    async fn send_union(&self, conversation_ids: Vec<String>) -> Result<()> {
+        let commands = self
+            .connector
+            .client()
+            .as_commands()
+            .ok_or_else(|| anyhow::anyhow!("daemon transport has no command channel"))?;
+        commands
+            .send_command(api::Command::SubscribeConversations { conversation_ids })
+            .await?;
+        Ok(())
+    }
 }
 
 /// Drain union updates and forward each *changed* set to the daemon, re-sending
@@ -98,11 +143,83 @@ pub trait SubscriptionSink: Send + Sync {
 ///   the socket closed.
 pub async fn run_forwarder(
     sink: Arc<dyn SubscriptionSink>,
-    union_rx: watch::Receiver<Vec<String>>,
-    reconnect_rx: mpsc::UnboundedReceiver<()>,
+    mut union_rx: watch::Receiver<Vec<String>>,
+    mut reconnect_rx: mpsc::UnboundedReceiver<()>,
 ) {
-    let _ = (sink, union_rx, reconnect_rx);
-    todo!("spec: implemented in the following commit")
+    let mut last_sent: Option<Vec<String>> = None;
+    // The newest union we know of, kept out of `union_rx` so the reconnect arm
+    // can re-send it without borrowing the receiver the `changed()` future holds.
+    let mut current = union_rx.borrow_and_update().clone();
+
+    // Send the current union up front (usually empty — no browser has subscribed
+    // yet, so `forward_if_changed` sends nothing).
+    forward_if_changed(sink.as_ref(), current.clone(), &mut last_sent).await;
+
+    let mut reconnect_open = true;
+    loop {
+        tokio::select! {
+            changed = union_rx.changed() => {
+                if changed.is_err() {
+                    break; // every union sender dropped — the BFF is shutting down.
+                }
+                // `watch` holds only the newest value, coalescing a burst.
+                current = union_rx.borrow_and_update().clone();
+                forward_if_changed(sink.as_ref(), current.clone(), &mut last_sent).await;
+            }
+            reconnect = reconnect_rx.recv(), if reconnect_open => {
+                match reconnect {
+                    Some(()) => resend_on_reconnect(sink.as_ref(), &current, &mut last_sent).await,
+                    // The reconnect detector is gone; keep serving union updates.
+                    None => reconnect_open = false,
+                }
+            }
+        }
+    }
+}
+
+/// Send `union` unless it equals the last successfully-sent set. On send failure
+/// leave `last_sent` unchanged so the next change (or reconnect) re-attempts.
+/// The startup / all-unsubscribed empty union is recorded but not sent — there
+/// is nothing for the daemon to unsubscribe from.
+async fn forward_if_changed(
+    sink: &dyn SubscriptionSink,
+    union: Vec<String>,
+    last_sent: &mut Option<Vec<String>>,
+) {
+    if last_sent.as_ref() == Some(&union) {
+        return;
+    }
+    if union.is_empty() && last_sent.is_none() {
+        *last_sent = Some(union);
+        return;
+    }
+    match sink.send_union(union.clone()).await {
+        Ok(()) => *last_sent = Some(union),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to forward SubscribeConversations union to daemon")
+        }
+    }
+}
+
+/// Re-send the current union after a daemon reconnect: the daemon dropped the
+/// subscription when the socket closed, and `send_command` fails fast (rather
+/// than blocking) if the `Connector` is still mid-reconnect, so retry briefly.
+async fn resend_on_reconnect(
+    sink: &dyn SubscriptionSink,
+    current: &[String],
+    last_sent: &mut Option<Vec<String>>,
+) {
+    for attempt in 0..RECONNECT_RESEND_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(RECONNECT_RESEND_BACKOFF).await;
+        }
+        // Force a send even though the union is unchanged.
+        *last_sent = None;
+        forward_if_changed(sink, current.to_vec(), last_sent).await;
+        if last_sent.is_some() {
+            break; // re-sent (or nothing to send: empty union) — done.
+        }
+    }
 }
 
 #[cfg(test)]
@@ -153,7 +270,11 @@ mod tests {
         let t = UnionTracker::new();
         t.apply("s1", &ids(&["c1"]));
         t.apply("s2", &ids(&["c1"]));
-        assert_eq!(t.apply("s1", &[]), ids(&["c1"]), "c1 stays: s2 still views it");
+        assert_eq!(
+            t.apply("s1", &[]),
+            ids(&["c1"]),
+            "c1 stays: s2 still views it"
+        );
         assert_eq!(
             t.apply("s2", &[]),
             Vec::<String>::new(),
@@ -330,7 +451,11 @@ mod tests {
         // the retry must succeed.
         sink.arm_failures(1);
         rc_tx.send(()).unwrap();
-        assert_eq!(recv_send(&mut rx).await, ids(&["c1"]), "failed first attempt");
+        assert_eq!(
+            recv_send(&mut rx).await,
+            ids(&["c1"]),
+            "failed first attempt"
+        );
         assert_eq!(recv_send(&mut rx).await, ids(&["c1"]), "retry succeeds");
     }
 
@@ -345,7 +470,11 @@ mod tests {
         let _h = tokio::spawn(run_forwarder(sink.clone(), union_rx, rc_rx));
 
         union_tx.send(ids(&["c1"])).unwrap();
-        assert_eq!(recv_send(&mut rx).await, ids(&["c1"]), "first attempt fails");
+        assert_eq!(
+            recv_send(&mut rx).await,
+            ids(&["c1"]),
+            "first attempt fails"
+        );
         // Same union pushed again: because the prior send failed, it re-attempts.
         union_tx.send(ids(&["c1"])).unwrap();
         assert_eq!(recv_send(&mut rx).await, ids(&["c1"]), "retry now succeeds");

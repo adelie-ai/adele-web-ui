@@ -126,6 +126,61 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    // Forward the union of the browser sessions' subscribed conversations onto
+    // the BFF's single daemon connection (#35), closing the last gap in live
+    // multi-client sync (#15). Without it the daemon — which gates per-turn
+    // fan-out by subscription — never fans a NATIVE client's turn (gtk / tui /
+    // voice) for a conversation a browser is viewing to the BFF, so the relay
+    // has nothing to route. The registry's change observer feeds a union
+    // tracker; a background task de-dupes and issues `SubscribeConversations`,
+    // re-sending it on daemon reconnect (the daemon drops it when the socket
+    // closes). Installed before the router serves, so no browser connects first.
+    {
+        use desktop_assistant_client_common::SignalEvent;
+
+        let tracker = Arc::new(subs_forward::UnionTracker::new());
+        let (union_tx, union_rx) = tokio::sync::watch::channel(Vec::<String>::new());
+        let observer_tracker = Arc::clone(&tracker);
+        subs.set_change_observer(Arc::new(move |session: &str, convs: &[String]| {
+            // Synchronous + non-blocking (contract of the observer): recompute
+            // the union and hand it to the forwarder. A send error only means
+            // the forwarder has stopped (process shutting down).
+            let union = observer_tracker.apply(session, convs);
+            let _ = union_tx.send(union);
+        }));
+
+        // Detect daemon reconnects off the Connector's signal stream (it survives
+        // reconnects but the daemon forgets each connection's
+        // `SubscribeConversations` when the socket drops), and poke the forwarder
+        // to re-send the current union.
+        let (reconnect_tx, reconnect_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reconnect_connector = Arc::clone(&connector);
+        tokio::spawn(async move {
+            loop {
+                let mut signals = reconnect_connector.subscribe();
+                // Drain until the stream reports a drop or ends.
+                loop {
+                    match signals.recv().await {
+                        Some(SignalEvent::Disconnected { .. }) | None => break,
+                        Some(_) => {}
+                    }
+                }
+                // Give the Connector supervisor a moment to reconnect in place,
+                // then trigger a re-send (`run_forwarder` retries transient
+                // failures if it is still mid-reconnect).
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if reconnect_tx.send(()).is_err() {
+                    break; // forwarder gone
+                }
+            }
+        });
+
+        let sink = Arc::new(subs_forward::ConnectorSubscriptionSink::new(Arc::clone(
+            &connector,
+        )));
+        tokio::spawn(subs_forward::run_forwarder(sink, union_rx, reconnect_rx));
+    }
+
     let handler = Arc::new(ForwardingHandler::new(
         Arc::clone(&connector),
         Arc::clone(&subs),
