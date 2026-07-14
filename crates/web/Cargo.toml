@@ -1,0 +1,48 @@
+[package]
+name = "adele-web-ui-web"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/adelie-ai/adele-web-ui"
+
+# Own workspace (the parent excludes `crates/web`): this keeps the native BFF
+# gate from ever pulling the wasm/CSR dependency graph. Built for
+# wasm32-unknown-unknown via Trunk (`just build-web`).
+[workspace]
+
+[[bin]]
+name = "adele-web-ui-web"
+path = "src/main.rs"
+
+# --- Pure, both-target dependencies -------------------------------------------
+# The shared reducer core + the wire types. Both compile to the host target too,
+# so the protocol/mapping modules are unit-testable with plain `cargo test`
+# (see `src/wire.rs`). Path-deps resolve to the sibling repos in the primary
+# checkout and, from a worktree, to the `.worktrees/adele-web-ui/<repo>` symlinks
+# (same pattern as the server crate, one level deeper).
+[dependencies]
+client-ui-common = { path = "../../../client-ui-common" }
+desktop-assistant-api-model = { path = "../../../desktop-assistant/crates/api-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- Wasm-only dependencies ---------------------------------------------------
+# Excluded from the host build so `cargo test` (native) stays light and the pure
+# modules don't drag in leptos/gloo. The UI modules are `#[cfg(target_arch =
+# "wasm32")]`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+gloo-net = { version = "0.6", features = ["websocket", "http"] }
+gloo-storage = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+futures = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"

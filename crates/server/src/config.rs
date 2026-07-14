@@ -13,6 +13,22 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_PORT: u16 = 9379;
 /// Default bind address — loopback. Override to a VPN interface, never public.
 pub const DEFAULT_BIND: &str = "127.0.0.1";
+/// Default directory of built SPA static assets, relative to the CWD (dev). In
+/// the container this is overridden to `/srv/web` via `ADELE_WEB_UI_WEB_DIR`.
+pub const DEFAULT_WEB_DIR: &str = "crates/web/dist";
+
+/// Which transport the BFF uses to reach the daemon (the "back door").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DaemonTransport {
+    /// Local Unix domain socket — a co-located daemon, authenticated by kernel
+    /// peer-cred (desktop-assistant#407). Default; unchanged local behavior.
+    #[default]
+    Uds,
+    /// WebSocket to a remote daemon (e.g. on k8s). Auth is the daemon's `/login`
+    /// password exchange (or a pre-minted `daemon_ws_jwt`).
+    Ws,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -32,6 +48,21 @@ pub struct BffConfig {
     /// Static login password. `None` disables password login (`/login` returns
     /// no token); PAM/system auth is a follow-up.
     pub login_password: Option<String>,
+    /// Directory of built SPA static assets served at `/`. `None` ⇒
+    /// [`DEFAULT_WEB_DIR`]. Absent-on-disk is tolerated (API-only; logged).
+    pub web_dir: Option<PathBuf>,
+    /// Transport used to reach the daemon (back door): UDS (default, co-located)
+    /// or WS (a remote daemon, e.g. on k8s).
+    pub daemon_transport: DaemonTransport,
+    /// Daemon WebSocket URL for the WS back door, e.g.
+    /// `ws://adele-daemon:11339/ws`. Required when `daemon_transport = ws`.
+    pub daemon_ws_url: Option<String>,
+    /// Username for the daemon's `/login` password exchange (WS back door).
+    pub daemon_ws_username: Option<String>,
+    /// Password for the daemon's `/login` password exchange (WS back door).
+    pub daemon_ws_password: Option<String>,
+    /// Pre-minted daemon JWT (WS back door). When set, used instead of `/login`.
+    pub daemon_ws_jwt: Option<String>,
     /// UDS socket to the daemon. `None` resolves to the platform default.
     pub uds_socket: Option<PathBuf>,
     /// JWT `iss` for the browser session tokens the BFF issues + validates.
@@ -53,6 +84,12 @@ impl Default for BffConfig {
             allowed_origins: Vec::new(),
             login_username: "adele".to_string(),
             login_password: None,
+            web_dir: None,
+            daemon_transport: DaemonTransport::Uds,
+            daemon_ws_url: None,
+            daemon_ws_username: None,
+            daemon_ws_password: None,
+            daemon_ws_jwt: None,
             uds_socket: None,
             issuer: None,
             audience: None,
@@ -117,6 +154,92 @@ impl BffConfig {
             .unwrap_or_else(|| format!("{}.adelie-ai", current_username()))
     }
 
+    /// Resolve the SPA static-asset dir: the configured value, else
+    /// [`DEFAULT_WEB_DIR`].
+    pub fn web_dir(&self) -> PathBuf {
+        self.web_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_WEB_DIR))
+    }
+
+    /// Overlay `ADELE_WEB_UI_*` environment variables on top of the loaded TOML
+    /// (env wins), so a container or systemd unit can configure the service with
+    /// no config file. Unset/blank vars leave the current value untouched.
+    pub fn apply_env_overrides(&mut self) {
+        self.apply_overrides_from(|key| std::env::var(key).ok());
+    }
+
+    /// Pure core of [`apply_env_overrides`], parameterized over the lookup so it
+    /// is unit-testable without mutating the process environment.
+    fn apply_overrides_from(&mut self, get: impl Fn(&str) -> Option<String>) {
+        let s = |key: &str| {
+            get(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        if let Some(v) = s("ADELE_WEB_UI_ENABLED") {
+            self.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = s("ADELE_WEB_UI_BIND_ADDRESS") {
+            self.bind_address = v;
+        }
+        if let Some(v) = s("ADELE_WEB_UI_PORT")
+            && let Ok(port) = v.parse()
+        {
+            self.port = port;
+        }
+        if let Some(v) = s("ADELE_WEB_UI_ALLOWED_ORIGINS") {
+            self.allowed_origins = v
+                .split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect();
+        }
+        if let Some(v) = s("ADELE_WEB_UI_LOGIN_USERNAME") {
+            self.login_username = v;
+        }
+        if let Some(v) = s("ADELE_WEB_UI_LOGIN_PASSWORD") {
+            self.login_password = Some(v);
+        }
+        if let Some(v) = s("ADELE_WEB_UI_ISSUER") {
+            self.issuer = Some(v);
+        }
+        if let Some(v) = s("ADELE_WEB_UI_AUDIENCE") {
+            self.audience = Some(v);
+        }
+        if let Some(v) = s("ADELE_WEB_UI_WEB_DIR") {
+            self.web_dir = Some(PathBuf::from(v));
+        }
+        if let Some(v) = s("ADELE_WEB_UI_UDS_SOCKET") {
+            self.uds_socket = Some(PathBuf::from(v));
+        }
+        // --- Daemon back-door transport --------------------------------------
+        if let Some(v) = s("ADELE_WEB_UI_DAEMON_TRANSPORT") {
+            match v.to_ascii_lowercase().as_str() {
+                "ws" => self.daemon_transport = DaemonTransport::Ws,
+                "uds" => self.daemon_transport = DaemonTransport::Uds,
+                other => {
+                    tracing::warn!(
+                        transport = other,
+                        "unknown ADELE_WEB_UI_DAEMON_TRANSPORT (want ws|uds); keeping current"
+                    );
+                }
+            }
+        }
+        if let Some(v) = s("ADELE_WEB_UI_DAEMON_WS_URL") {
+            self.daemon_ws_url = Some(v);
+        }
+        if let Some(v) = s("ADELE_WEB_UI_DAEMON_WS_USERNAME") {
+            self.daemon_ws_username = Some(v);
+        }
+        if let Some(v) = s("ADELE_WEB_UI_DAEMON_WS_PASSWORD") {
+            self.daemon_ws_password = Some(v);
+        }
+        if let Some(v) = s("ADELE_WEB_UI_DAEMON_WS_JWT") {
+            self.daemon_ws_jwt = Some(v);
+        }
+    }
+
     /// Load from `path`, falling back to defaults when the file is absent.
     /// A present-but-malformed file is an error (don't silently run on defaults
     /// when the operator clearly intended a config).
@@ -136,5 +259,100 @@ impl BffConfig {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
             .unwrap_or_else(|| PathBuf::from("."));
         base.join("adele-web-ui").join("config.toml")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Build a `get` closure over a fixed map for the pure override core.
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn defaults_are_uds_and_disabled() {
+        let cfg = BffConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.daemon_transport, DaemonTransport::Uds);
+        assert_eq!(cfg.web_dir(), PathBuf::from(DEFAULT_WEB_DIR));
+    }
+
+    #[test]
+    fn env_overrides_configure_ws_back_door() {
+        let mut cfg = BffConfig::default();
+        cfg.apply_overrides_from(env(&[
+            ("ADELE_WEB_UI_ENABLED", "true"),
+            ("ADELE_WEB_UI_BIND_ADDRESS", "0.0.0.0"),
+            ("ADELE_WEB_UI_PORT", "9379"),
+            (
+                "ADELE_WEB_UI_ALLOWED_ORIGINS",
+                "http://localhost:9379, http://127.0.0.1:9379",
+            ),
+            ("ADELE_WEB_UI_DAEMON_TRANSPORT", "ws"),
+            ("ADELE_WEB_UI_DAEMON_WS_URL", "ws://adele-daemon:11339/ws"),
+            ("ADELE_WEB_UI_DAEMON_WS_USERNAME", "adele"),
+            ("ADELE_WEB_UI_DAEMON_WS_PASSWORD", "s3cret"),
+            ("ADELE_WEB_UI_WEB_DIR", "/srv/web"),
+        ]));
+
+        assert!(cfg.enabled);
+        assert_eq!(cfg.bind_address, "0.0.0.0");
+        assert_eq!(cfg.port, 9379);
+        assert_eq!(
+            cfg.allowed_origins,
+            vec![
+                "http://localhost:9379".to_string(),
+                "http://127.0.0.1:9379".to_string(),
+            ]
+        );
+        assert_eq!(cfg.daemon_transport, DaemonTransport::Ws);
+        assert_eq!(
+            cfg.daemon_ws_url.as_deref(),
+            Some("ws://adele-daemon:11339/ws")
+        );
+        assert_eq!(cfg.daemon_ws_username.as_deref(), Some("adele"));
+        assert_eq!(cfg.daemon_ws_password.as_deref(), Some("s3cret"));
+        assert_eq!(cfg.web_dir(), PathBuf::from("/srv/web"));
+    }
+
+    #[test]
+    fn empty_env_leaves_values_untouched() {
+        let mut cfg = BffConfig {
+            login_username: "preset".to_string(),
+            ..Default::default()
+        };
+        // Present-but-blank must not clobber; absent must not clobber.
+        cfg.apply_overrides_from(env(&[("ADELE_WEB_UI_LOGIN_USERNAME", "  ")]));
+        assert_eq!(cfg.login_username, "preset");
+        assert_eq!(cfg.daemon_transport, DaemonTransport::Uds);
+    }
+
+    #[test]
+    fn unknown_transport_keeps_current() {
+        let mut cfg = BffConfig::default();
+        cfg.apply_overrides_from(env(&[("ADELE_WEB_UI_DAEMON_TRANSPORT", "carrier-pigeon")]));
+        assert_eq!(cfg.daemon_transport, DaemonTransport::Uds);
+    }
+
+    #[test]
+    fn enabled_accepts_common_truthy_values_only() {
+        for truthy in ["1", "true", "YES", "On"] {
+            let mut cfg = BffConfig::default();
+            cfg.apply_overrides_from(env(&[("ADELE_WEB_UI_ENABLED", truthy)]));
+            assert!(cfg.enabled, "{truthy} should enable");
+        }
+        let mut cfg = BffConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        cfg.apply_overrides_from(env(&[("ADELE_WEB_UI_ENABLED", "false")]));
+        assert!(!cfg.enabled);
     }
 }
