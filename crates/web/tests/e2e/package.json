@@ -10,7 +10,8 @@
     "test:switcher": "node conversation_switcher.mjs",
     "test:context-usage": "node context_usage_indicator.mjs",
     "test:live-sync": "node live_multi_client_sync.mjs",
-    "test:scratchpad": "node scratchpad_view.mjs"
+    "test:scratchpad": "node scratchpad_view.mjs",
+    "test:read-aloud": "node read_aloud.mjs"
   },
   "dependencies": {
     "playwright": "^1.48.0",
