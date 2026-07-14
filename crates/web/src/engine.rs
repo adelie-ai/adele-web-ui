@@ -21,7 +21,8 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use client_ui_common::{
-    Effect, SelectedModel, UiMessage, WindowState, interactive_default_from_purposes,
+    ContextUsageView, Effect, SelectedModel, UiMessage, WindowState,
+    interactive_default_from_purposes,
 };
 
 use crate::connections::{CredentialAction, secret_command};
@@ -69,6 +70,13 @@ pub struct ViewSignals {
     pub effort: RwSignal<Option<EffortLevel>>,
     /// A one-shot passive toast (e.g. a dangling-model-selection fallback).
     pub toast: RwSignal<Option<String>>,
+    // --- Context-window usage (issue #14) ------------------------------------
+    /// The active conversation's latest context-window fill, or `None` before
+    /// its first turn completes / right after a conversation switch. The reducer
+    /// owns the numbers + colour bucket (`ContextUsageView`, DA#341) and paints
+    /// only the viewed conversation; the engine mirrors its `SetContextUsage`
+    /// effect here for the header indicator to render.
+    pub context_usage: RwSignal<Option<ContextUsageView>>,
     // --- Connections (issue #10) ---------------------------------------------
     /// Every configured LLM connection, refreshed on demand by the Connections
     /// panel via `ListConnections`. Panel-only state (not consumed by the chat).
@@ -122,6 +130,7 @@ impl ViewSignals {
             stored_selection: RwSignal::new(None),
             effort: RwSignal::new(None),
             toast: RwSignal::new(None),
+            context_usage: RwSignal::new(None),
             connections: RwSignal::new(Vec::new()),
             connections_busy: RwSignal::new(false),
             connections_error: RwSignal::new(None),
@@ -307,10 +316,15 @@ impl Engine {
             // switcher drawer renders (the active-row marker is mirrored in
             // `sync_view` from `current_conversation_id`).
             Effect::SetConversations(convs) => self.view.conversations.set(convs),
-            // The message list, streaming buffer, conversation list, context
-            // usage, tasks, scratchpad, voice, and client-tool effects are
-            // either re-derived in `sync_view` or out of scope for the
-            // foundation. Deliberately ignored (their screens land later).
+            // --- Context-window usage (issue #14) ----------------------------
+            // The reducer emits `Some(view)` for a completed turn on the viewed
+            // conversation and `None` when switching away (clearing a stale
+            // reading); the engine just mirrors it into the indicator's signal.
+            Effect::SetContextUsage(usage) => self.view.context_usage.set(usage),
+            // The message list, streaming buffer, tasks, scratchpad, voice, and
+            // client-tool effects are either re-derived in `sync_view` or out of
+            // scope for the foundation. Deliberately ignored (their screens land
+            // later).
             _ => {}
         }
     }

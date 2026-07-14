@@ -36,6 +36,20 @@ A stateful mock keeps this deterministic and isolated from the shared local
 daemon (concurrent agents build against it) — the test never touches data it
 didn't create. The pure row helpers (`src/sidebar.rs`) run under `just check`.
 
+## `context_usage_indicator.mjs`
+
+Coverage for the context-window usage indicator (issue #14). The fake BFF acks a
+sent message and streams the turn's events back — including the per-turn
+`context_usage` event (DA#341) — as correctly-nested `WsFrame::Event` frames.
+The test asserts the indicator is **hidden** before any turn, then **appears**
+after turn one with the shared `used / budget (pct%)` readout and the green
+colour bucket, then **updates in place** to amber after a heavier second turn
+crosses the 0.85 compaction line — proving the whole wire→reducer→engine→DOM
+path in a real browser. The pure `used/budget/percent` formatting, colour
+bucketing, and the web-specific `aria_label` / `bar_percent` are unit-tested
+under `just check` (`client-ui-common`'s `context_usage` + `src/context.rs`);
+this covers only the browser-render + reactive-update layer they can't reach.
+
 ## Running
 
 ```sh

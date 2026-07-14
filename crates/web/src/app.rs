@@ -20,7 +20,7 @@ use client_ui_common::UiMessage;
 
 use crate::engine::{Engine, ViewSignals};
 use crate::settings::{self, SettingsPanel, SettingsSheet};
-use crate::{auth, transport};
+use crate::{auth, context, transport};
 
 /// Root component. Shows the login screen until a token is present, then the
 /// chat screen; signing out clears the token and returns here.
@@ -259,6 +259,10 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                     </div>
                 </Show>
             </section>
+
+            // Context-window usage indicator (issue #14): unobtrusive, above the
+            // composer; hidden until the active conversation reports a reading.
+            {context::context_usage_bar(view)}
 
             <form class="composer" on:submit=on_send>
                 <input

@@ -5,7 +5,8 @@
   "description": "Explicitly-invoked headless e2e regression tests (not part of `just check`).",
   "scripts": {
     "test": "node transport_reliability.mjs",
-    "test:switcher": "node conversation_switcher.mjs"
+    "test:switcher": "node conversation_switcher.mjs",
+    "test:context-usage": "node context_usage_indicator.mjs"
   },
   "dependencies": {
     "playwright": "^1.48.0",
