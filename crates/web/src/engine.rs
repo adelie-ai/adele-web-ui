@@ -13,8 +13,8 @@ use std::rc::Rc;
 
 use desktop_assistant_api_model::client::ChatMessage;
 use desktop_assistant_api_model::{
-    Command, CommandResult, ConversationModelSelectionView, EffortLevel, ModelListing,
-    SendPromptOverride,
+    Command, CommandResult, ConnectionView, ConversationModelSelectionView, EffortLevel,
+    ModelListing, PurposeConfigView, PurposeKindApi, PurposesView, SendPromptOverride,
 };
 use futures::channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
@@ -62,6 +62,20 @@ pub struct ViewSignals {
     pub effort: RwSignal<Option<EffortLevel>>,
     /// A one-shot passive toast (e.g. a dangling-model-selection fallback).
     pub toast: RwSignal<Option<String>>,
+    // --- Purposes (issue #11) -------------------------------------------------
+    // Web-only view state: the shared reducer doesn't own purpose routing, so the
+    // panel's data is loaded on demand and written straight to these signals
+    // (see `refresh_purposes` / `set_purpose`) rather than routed through the
+    // reducer's `UiMessage`s.
+    /// The daemon's purpose routing. `None` until the panel first loads it.
+    pub purposes: RwSignal<Option<PurposesView>>,
+    /// Connections offered in the purpose connection dropdowns.
+    pub purpose_connections: RwSignal<Vec<ConnectionView>>,
+    /// The *full* model list for the purpose model dropdowns — unlike `models`,
+    /// this keeps embedding-only models, which the embedding purpose needs.
+    pub purpose_models: RwSignal<Vec<ModelListing>>,
+    /// True while a purposes load or save is in flight (drives a busy hint).
+    pub purposes_busy: RwSignal<bool>,
 }
 
 impl ViewSignals {
@@ -81,6 +95,10 @@ impl ViewSignals {
             stored_selection: RwSignal::new(None),
             effort: RwSignal::new(None),
             toast: RwSignal::new(None),
+            purposes: RwSignal::new(None),
+            purpose_connections: RwSignal::new(Vec::new()),
+            purpose_models: RwSignal::new(Vec::new()),
+            purposes_busy: RwSignal::new(false),
         }
     }
 }
@@ -261,6 +279,90 @@ impl Engine {
                     let _ = tx.unbounded_send(UiMessage::Error(format!("refresh models: {e}")));
                 }
             }
+        });
+    }
+
+    // --- Purposes (issue #11) ------------------------------------------------
+    //
+    // Purpose routing isn't reducer state, so — unlike model selection — the
+    // panel's data is loaded on demand and written straight to the view signals.
+    // Both commands blind-forward through the BFF to the daemon (no BFF change).
+
+    /// Load the connections, purpose routing, and the full model list the
+    /// Purposes panel needs, writing each into its signal. Run when the panel
+    /// opens (and via its Refresh button). Non-fatal: a failed step leaves that
+    /// signal as-is and raises a toast; the others still populate.
+    pub fn refresh_purposes(&self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        // Set busy *synchronously* so the panel's "load once on open" guard
+        // (`purposes.is_none() && !busy`) can't fire a second load before the
+        // spawned task runs.
+        view.purposes_busy.set(true);
+        spawn_local(async move {
+            match transport.send_command(Command::ListConnections).await {
+                Ok(CommandResult::Connections(connections)) => {
+                    view.purpose_connections.set(connections)
+                }
+                Ok(other) => view.toast.set(Some(format!(
+                    "unexpected reply to ListConnections: {other:?}"
+                ))),
+                Err(e) => view.toast.set(Some(format!("load connections: {e}"))),
+            }
+            // The full, unfiltered model list (embedding models included).
+            match transport
+                .send_command(Command::ListAvailableModels {
+                    connection_id: None,
+                    refresh: false,
+                })
+                .await
+            {
+                Ok(CommandResult::Models(models)) => view.purpose_models.set(models),
+                Ok(other) => view.toast.set(Some(format!(
+                    "unexpected reply to ListAvailableModels: {other:?}"
+                ))),
+                Err(e) => view.toast.set(Some(format!("load models: {e}"))),
+            }
+            match transport.send_command(Command::GetPurposes).await {
+                Ok(CommandResult::Purposes(purposes)) => view.purposes.set(Some(*purposes)),
+                Ok(other) => view
+                    .toast
+                    .set(Some(format!("unexpected reply to GetPurposes: {other:?}"))),
+                Err(e) => view.toast.set(Some(format!("load purposes: {e}"))),
+            }
+            view.purposes_busy.set(false);
+        });
+    }
+
+    /// Persist one purpose's routing via `SetPurpose`, then re-fetch `GetPurposes`
+    /// so the panel reflects the daemon's stored, resolved state (a save is a
+    /// full replace). A failure raises a toast and leaves the loaded view intact.
+    pub fn set_purpose(&self, purpose: PurposeKindApi, config: PurposeConfigView) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        spawn_local(async move {
+            view.purposes_busy.set(true);
+            match transport
+                .send_command(Command::SetPurpose { purpose, config })
+                .await
+            {
+                Ok(CommandResult::Ack) => {
+                    if let Ok(CommandResult::Purposes(purposes)) =
+                        transport.send_command(Command::GetPurposes).await
+                    {
+                        view.purposes.set(Some(*purposes));
+                    }
+                }
+                Ok(other) => view
+                    .toast
+                    .set(Some(format!("unexpected reply to SetPurpose: {other:?}"))),
+                Err(e) => view.toast.set(Some(format!("save purpose: {e}"))),
+            }
+            view.purposes_busy.set(false);
         });
     }
 
