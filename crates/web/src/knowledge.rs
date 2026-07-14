@@ -35,16 +35,27 @@
 pub const EMPTY_BROWSE: &str =
     "Your knowledge base is empty — Adele saves durable facts here as she learns them.";
 
+/// How many entries a browse/search reads at once. A single generous page keeps
+/// the panel a simple read-only list (no pagination in v1); the daemon caps the
+/// KB well below this in practice.
+pub const KB_LIMIT: u32 = 50;
+
+/// Characters kept in a collapsed list-row preview before the ellipsis. The full
+/// content shows when the row is opened.
+const SNIPPET_CHARS: usize = 140;
+
 /// Collapse an entry's (assistant-produced, possibly multi-line) content into a
 /// single-line preview of at most `max_chars` characters, appending an ellipsis
 /// when it was truncated. Whitespace runs — including newlines — collapse to one
 /// space; empty content yields an empty string. Character-based (not byte-based)
 /// so multi-byte content never splits a codepoint.
 pub fn snippet(content: &str, max_chars: usize) -> String {
-    // STUB (spec commit): the real impl collapses whitespace and truncates; this
-    // returns the raw content so the collapse/truncate tests fail red.
-    let _ = max_chars;
-    content.to_string()
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let kept: String = collapsed.chars().take(max_chars).collect();
+    format!("{kept}\u{2026}")
 }
 
 /// A one-line summary for the panel header: entry/result counts (singular/
@@ -52,20 +63,22 @@ pub fn snippet(content: &str, max_chars: usize) -> String {
 /// empty browse returns the inviting [`EMPTY_BROWSE`] line; an empty search
 /// returns a plain "No matches."
 pub fn results_summary(count: usize, searching: bool) -> String {
-    // STUB (spec commit): real impl formats counts; this returns an empty string
-    // so every summary assertion fails red.
-    let _ = (count, searching);
-    String::new()
+    match (searching, count) {
+        (false, 0) => EMPTY_BROWSE.to_string(),
+        (false, 1) => "1 entry".to_string(),
+        (false, n) => format!("{n} entries"),
+        (true, 0) => "No matches.".to_string(),
+        (true, 1) => "1 result".to_string(),
+        (true, n) => format!("{n} results"),
+    }
 }
 
 /// Normalize the search box: trim surrounding whitespace and treat an
 /// all-whitespace / empty box as "no query" (browse mode), returning `None`.
 /// A non-empty query returns its trimmed form.
 pub fn normalize_query(raw: &str) -> Option<String> {
-    // STUB (spec commit): real impl trims and empties to `None`; this always
-    // returns `None` so the non-empty-query tests fail red.
-    let _ = raw;
-    None
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// The date portion of a daemon timestamp for the entry's meta line: everything
@@ -73,10 +86,242 @@ pub fn normalize_query(raw: &str) -> Option<String> {
 /// `"2026-07-14T12:30:00Z"` both render `"2026-07-14"`). A value without either
 /// separator is returned unchanged.
 pub fn short_date(ts: &str) -> String {
-    // STUB (spec commit): real impl splits on the date/time separator; this
-    // returns an empty string so the format tests fail red.
-    let _ = ts;
-    String::new()
+    ts.split(['T', ' ']).next().unwrap_or(ts).to_string()
+}
+
+/// A short meta line for an entry: when it was added, plus an "Updated" clause
+/// only when the update date differs from the creation date (so an untouched
+/// entry doesn't show a redundant "Added X · Updated X"). Empty timestamps are
+/// tolerated (an empty date simply drops out).
+pub fn meta_line(created_at: &str, updated_at: &str) -> String {
+    let created = short_date(created_at);
+    let updated = short_date(updated_at);
+    match (created.is_empty(), updated.is_empty() || updated == created) {
+        (true, _) if updated.is_empty() => String::new(),
+        (true, _) => format!("Updated {updated}"),
+        (false, true) => format!("Added {created}"),
+        (false, false) => format!("Added {created} \u{00b7} Updated {updated}"),
+    }
+}
+
+/// The Leptos knowledge-base panel (issue #19). Re-exported from the wasm-only
+/// [`ui`] submodule; `settings.rs` renders it as the `KnowledgeBase` panel body.
+#[cfg(target_arch = "wasm32")]
+pub use ui::knowledge_panel;
+
+#[cfg(target_arch = "wasm32")]
+mod ui {
+    //! Mobile-first Leptos view: a search box over a list of KB entries. Each row
+    //! is a >=44px tappable accordion header (a single-line snippet + tag chips +
+    //! date) that expands to the entry's full content when opened. Browse (most
+    //! recent) on open; typing a query and submitting runs a server-side search;
+    //! "Clear search" returns to browse. The list is driven by the engine's
+    //! `refresh_knowledge` / `search_knowledge` into `view.knowledge_*` signals.
+    //!
+    //! Read-only: entry content is assistant-produced, so it renders as escaped
+    //! plain text (Leptos escapes text children) — never `inner_html`.
+
+    use leptos::prelude::*;
+
+    use desktop_assistant_api_model::KnowledgeEntryView;
+
+    use super::{
+        EMPTY_BROWSE, SNIPPET_CHARS, meta_line, normalize_query, results_summary, snippet,
+    };
+    use crate::engine::ViewSignals;
+    use crate::settings::EngineHandle;
+
+    /// The panel body. Loads the browse list on open, hosts the search box, and
+    /// renders the results as expandable rows.
+    pub fn knowledge_panel(engine: EngineHandle, view: ViewSignals) -> impl IntoView {
+        // The search box text.
+        let query = RwSignal::new(String::new());
+        // Whether the shown results came from a search (drives the summary wording
+        // + the Clear affordance). Set synchronously at submit time so the header
+        // matches what produced the rows.
+        let searching = RwSignal::new(false);
+        // The id of the one expanded ("opened") entry, if any.
+        let expanded = RwSignal::new(None::<String>);
+
+        // Load the browse list once the panel mounts (re-created each time the tab
+        // opens, so this refreshes on every open). Deferred via an effect so the
+        // signal writes don't happen during render.
+        Effect::new(move |_| {
+            engine.with_value(|e| e.borrow().refresh_knowledge());
+        });
+
+        let submit = move |ev: leptos::ev::SubmitEvent| {
+            ev.prevent_default();
+            expanded.set(None);
+            match normalize_query(&query.get_untracked()) {
+                Some(q) => {
+                    searching.set(true);
+                    engine.with_value(|e| e.borrow().search_knowledge(q));
+                }
+                None => {
+                    searching.set(false);
+                    engine.with_value(|e| e.borrow().refresh_knowledge());
+                }
+            }
+        };
+
+        let clear = move |_| {
+            query.set(String::new());
+            searching.set(false);
+            expanded.set(None);
+            engine.with_value(|e| e.borrow().refresh_knowledge());
+        };
+
+        view! {
+            <section class="panel knowledge-panel">
+                <div class="panel-intro">
+                    <p class="panel-summary">
+                        {move || {
+                            results_summary(view.knowledge_entries.get().len(), searching.get())
+                        }}
+                    </p>
+                    <p class="panel-note muted">
+                        "Adele's long-term memory \u{2014} durable facts she keeps across \
+                         conversations. Search to find one, or browse the most recent. Read-only \
+                         here for now."
+                    </p>
+                </div>
+
+                <form class="kb-search" on:submit=submit>
+                    <input
+                        class="conn-input"
+                        type="search"
+                        placeholder="Search the knowledge base\u{2026}"
+                        prop:value=move || query.get()
+                        on:input=move |ev| query.set(event_target_value(&ev))
+                    />
+                    <button class="kb-search-btn" type="submit">
+                        "Search"
+                    </button>
+                </form>
+
+                <div class="field-head">
+                    <span class="field-label">
+                        {move || if searching.get() { "Results" } else { "Recent" }}
+                    </span>
+                    <Show when=move || searching.get()>
+                        <button class="link" on:click=clear>
+                            "Clear search"
+                        </button>
+                    </Show>
+                </div>
+
+                {move || {
+                    view.knowledge_error
+                        .get()
+                        .map(|e| {
+                            view! {
+                                <p class="conn-error" role="alert">
+                                    {e}
+                                </p>
+                            }
+                            .into_any()
+                        })
+                        .unwrap_or_else(|| ().into_any())
+                }}
+
+                {move || {
+                    let entries = view.knowledge_entries.get();
+                    let open = expanded.get();
+                    if entries.is_empty() {
+                        empty_state(
+                            view.knowledge_busy.get(),
+                            view.knowledge_loaded.get(),
+                            searching.get(),
+                        )
+                    } else {
+                        entries
+                            .into_iter()
+                            .map(|entry| {
+                                let is_open = open.as_deref() == Some(entry.id.as_str());
+                                entry_row(entry, is_open, expanded)
+                            })
+                            .collect_view()
+                            .into_any()
+                    }
+                }}
+            </section>
+        }
+    }
+
+    /// The empty-list message, distinguishing an in-flight first load from a
+    /// genuinely-empty browse and from a search that found nothing.
+    fn empty_state(busy: bool, loaded: bool, searching: bool) -> AnyView {
+        if busy && !loaded {
+            view! { <p class="empty muted">"Loading\u{2026}"</p> }.into_any()
+        } else if searching {
+            view! { <p class="empty muted">"No matches. Try different words."</p> }.into_any()
+        } else {
+            view! { <p class="empty muted">{EMPTY_BROWSE}</p> }.into_any()
+        }
+    }
+
+    /// One entry row: a tappable accordion header (snippet + tag chips + date)
+    /// that reveals the full content when `is_open`. Tapping toggles `expanded`,
+    /// which re-renders the list (so at most one row is open at a time).
+    fn entry_row(
+        entry: KnowledgeEntryView,
+        is_open: bool,
+        expanded: RwSignal<Option<String>>,
+    ) -> AnyView {
+        let id = entry.id.clone();
+        let toggle = move |_| {
+            expanded.update(|cur| {
+                if cur.as_deref() == Some(id.as_str()) {
+                    *cur = None;
+                } else {
+                    *cur = Some(id.clone());
+                }
+            });
+        };
+
+        let preview = snippet(&entry.content, SNIPPET_CHARS);
+        let meta = meta_line(&entry.created_at, &entry.updated_at);
+        let tags = entry.tags.clone();
+        let full_content = entry.content.clone();
+
+        let tag_chips = (!tags.is_empty()).then(|| {
+            view! {
+                <span class="kb-tags">
+                    {tags
+                        .into_iter()
+                        .map(|t| view! { <span class="kb-tag">{t}</span> })
+                        .collect_view()}
+                </span>
+            }
+        });
+
+        let detail = is_open.then(|| {
+            view! {
+                <div class="kb-entry-detail">
+                    <p class="kb-full-content">{full_content}</p>
+                </div>
+            }
+        });
+
+        view! {
+            <div class="kb-entry" class:expanded=is_open>
+                <button
+                    class="kb-entry-head"
+                    aria-expanded=if is_open { "true" } else { "false" }
+                    on:click=toggle
+                >
+                    <span class="kb-snippet">{preview}</span>
+                    <span class="kb-entry-foot">
+                        <span class="kb-meta muted">{meta}</span>
+                        {tag_chips}
+                    </span>
+                </button>
+                {detail}
+            </div>
+        }
+        .into_any()
+    }
 }
 
 #[cfg(test)]
@@ -188,5 +433,39 @@ mod tests {
         assert_eq!(short_date("2026-07-14"), "2026-07-14");
         assert_eq!(short_date(""), "");
         assert_eq!(short_date("unknown"), "unknown");
+    }
+
+    #[test]
+    fn meta_line_added_only_when_never_updated() {
+        // created == updated (a fresh, untouched entry) → no redundant "Updated".
+        assert_eq!(
+            meta_line("2026-07-14 00:00:00", "2026-07-14 00:00:00"),
+            "Added 2026-07-14"
+        );
+        // updated missing → still just "Added".
+        assert_eq!(meta_line("2026-07-14 00:00:00", ""), "Added 2026-07-14");
+    }
+
+    #[test]
+    fn meta_line_shows_update_when_it_differs() {
+        assert_eq!(
+            meta_line("2026-07-14 00:00:00", "2026-07-20 09:30:00"),
+            "Added 2026-07-14 \u{00b7} Updated 2026-07-20"
+        );
+    }
+
+    #[test]
+    fn meta_line_tolerates_missing_created() {
+        assert_eq!(meta_line("", ""), "", "no dates → empty meta line");
+        assert_eq!(meta_line("", "2026-07-20 09:30:00"), "Updated 2026-07-20");
+    }
+
+    #[test]
+    fn constants_are_sane() {
+        assert!(KB_LIMIT >= 1, "must read at least one entry");
+        assert!(
+            SNIPPET_CHARS >= 20,
+            "a preview shorter than ~20 chars is useless"
+        );
     }
 }
