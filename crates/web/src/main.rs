@@ -12,10 +12,15 @@ mod auth;
 #[cfg(target_arch = "wasm32")]
 mod engine;
 #[cfg(target_arch = "wasm32")]
+mod settings;
+#[cfg(target_arch = "wasm32")]
 mod transport;
 
-// Pure wire-protocol mapping (`api::Event` -> `UiMessage`, frame round-trips):
-// consumed by the transport on wasm, and unit-tested on the host.
+// Pure, view-free modules consumed by the UI on wasm and unit-tested on the
+// host: the wire-protocol mapping (`api::Event` -> `UiMessage`, frame
+// round-trips) and the model-selection helpers (issue #9).
+#[cfg(any(target_arch = "wasm32", test))]
+mod model;
 #[cfg(any(target_arch = "wasm32", test))]
 mod wire;
 
