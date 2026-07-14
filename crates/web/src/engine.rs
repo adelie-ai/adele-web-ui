@@ -14,7 +14,8 @@ use std::rc::Rc;
 use desktop_assistant_api_model::client::ChatMessage;
 use desktop_assistant_api_model::{
     Command, CommandResult, ConnectionConfigView, ConnectionView, ConversationModelSelectionView,
-    EffortLevel, ModelListing, PurposeConfigView, PurposeKindApi, PurposesView, SendPromptOverride,
+    ConversationPersonalityView, EffortLevel, ModelListing, PurposeConfigView, PurposeKindApi,
+    PurposesView, SendPromptOverride,
 };
 use futures::channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
@@ -84,7 +85,7 @@ pub struct ViewSignals {
     // Web-only view state: the shared reducer doesn't own purpose routing, so the
     // panel's data is loaded on demand and written straight to these signals
     // (see `refresh_purposes` / `set_purpose`) rather than routed through the
-    // reducer's `UiMessage`s.
+    // reducer's `UiMessage`s. The personality panel (#13) follows the same shape.
     /// The daemon's purpose routing. `None` until the panel first loads it.
     pub purposes: RwSignal<Option<PurposesView>>,
     /// Connections offered in the purpose connection dropdowns.
@@ -94,6 +95,20 @@ pub struct ViewSignals {
     pub purpose_models: RwSignal<Vec<ModelListing>>,
     /// True while a purposes load or save is in flight (drives a busy hint).
     pub purposes_busy: RwSignal<bool>,
+    // --- Personality (issue #13) ---------------------------------------------
+    // Per-conversation state, not owned by the shared reducer: the panel loads
+    // the current conversation's override on demand (`GetConversation`) and
+    // persists edits (`SetConversationPersonality`) straight to these signals.
+    /// The current conversation's stored personality override, or `None` when it
+    /// inherits the global personality. Pre-fills the panel's trait selectors.
+    pub personality: RwSignal<Option<desktop_assistant_api_model::ConversationPersonalityView>>,
+    /// Whether the override has been fetched at least once — distinguishes "not
+    /// yet loaded" from a legitimately-`None` (no) override, so the panel's
+    /// load-once guard fires exactly once rather than on every empty override.
+    pub personality_loaded: RwSignal<bool>,
+    /// True while a personality load or save is in flight (drives the busy hint
+    /// and disables Save).
+    pub personality_busy: RwSignal<bool>,
 }
 
 impl ViewSignals {
@@ -121,6 +136,9 @@ impl ViewSignals {
             purpose_connections: RwSignal::new(Vec::new()),
             purpose_models: RwSignal::new(Vec::new()),
             purposes_busy: RwSignal::new(false),
+            personality: RwSignal::new(None),
+            personality_loaded: RwSignal::new(false),
+            personality_busy: RwSignal::new(false),
         }
     }
 }
@@ -498,6 +516,84 @@ impl Engine {
                 Err(e) => view.toast.set(Some(format!("save purpose: {e}"))),
             }
             view.purposes_busy.set(false);
+        });
+    }
+
+    // --- Personality (issue #13) ---------------------------------------------
+    //
+    // Per-conversation, persisted on the daemon (unlike the per-send model
+    // override): the panel reads the stored override from `GetConversation` and
+    // writes edits with `SetConversationPersonality`. Both blind-forward through
+    // the BFF (no BFF change). Writes straight to the view signals, matching the
+    // purposes panel; the shared reducer doesn't model per-conversation
+    // personality.
+
+    /// Load the current conversation's stored personality override into
+    /// `personality`, marking `personality_loaded`. With no active conversation
+    /// yet, mark loaded with `None` so the panel shows the (empty) editable form
+    /// rather than a perpetual spinner. Called on first open + the Refresh button.
+    pub fn refresh_personality(&self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        let Some(conversation_id) = self.state.current_conversation_id.clone() else {
+            view.personality.set(None);
+            view.personality_loaded.set(true);
+            return;
+        };
+        view.personality_busy.set(true);
+        spawn_local(async move {
+            match transport
+                .send_command(Command::GetConversation {
+                    id: conversation_id,
+                })
+                .await
+            {
+                Ok(CommandResult::Conversation(conversation)) => {
+                    view.personality.set(conversation.conversation_personality);
+                    view.personality_loaded.set(true);
+                }
+                Ok(other) => view.toast.set(Some(format!(
+                    "unexpected reply to GetConversation: {other:?}"
+                ))),
+                Err(e) => view.toast.set(Some(format!("load personality: {e}"))),
+            }
+            view.personality_busy.set(false);
+        });
+    }
+
+    /// Persist the conversation's personality override via
+    /// `SetConversationPersonality`, then reflect the daemon's echoed stored
+    /// value. An all-`None` override clears it (the daemon stores `NULL`), which
+    /// we mirror as `None` so the panel resets every trait to Global.
+    pub fn set_personality(&self, personality: ConversationPersonalityView) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let Some(conversation_id) = self.state.current_conversation_id.clone() else {
+            return;
+        };
+        let view = self.view;
+        view.personality_busy.set(true);
+        spawn_local(async move {
+            match transport
+                .send_command(Command::SetConversationPersonality {
+                    conversation_id,
+                    personality,
+                })
+                .await
+            {
+                Ok(CommandResult::ConversationPersonality(stored)) => {
+                    view.personality.set((!stored.is_empty()).then_some(stored));
+                    view.personality_loaded.set(true);
+                }
+                Ok(other) => view.toast.set(Some(format!(
+                    "unexpected reply to SetConversationPersonality: {other:?}"
+                ))),
+                Err(e) => view.toast.set(Some(format!("save personality: {e}"))),
+            }
+            view.personality_busy.set(false);
         });
     }
 

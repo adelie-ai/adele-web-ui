@@ -817,6 +817,19 @@ button {
   font-size: 13px;
 }
 
+/* --- Personality panel ----------------------------------------------------- */
+/* One card holding a labelled <select> per "Expressive 7" trait. Reuses the
+   purpose card / select / save styling; the rows sit tighter than purpose
+   fields since each is a single control. The last row drops its bottom margin
+   so the Save button hugs the card. */
+.personality-card .personality-row {
+  margin-bottom: 10px;
+}
+
+.personality-card .personality-row:last-of-type {
+  margin-bottom: 14px;
+}
+
 @keyframes backdrop-in {
   from {
     opacity: 0;
