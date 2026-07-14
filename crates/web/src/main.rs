@@ -26,6 +26,8 @@ mod transport;
 #[cfg(any(target_arch = "wasm32", test))]
 mod connections;
 #[cfg(any(target_arch = "wasm32", test))]
+mod context;
+#[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]
 mod purposes;
