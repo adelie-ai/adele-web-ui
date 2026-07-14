@@ -1,0 +1,13 @@
+{
+  "name": "adele-web-ui-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Explicitly-invoked headless e2e regression tests (not part of `just check`).",
+  "scripts": {
+    "test": "node transport_reliability.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0",
+    "ws": "^8.18.0"
+  }
+}
