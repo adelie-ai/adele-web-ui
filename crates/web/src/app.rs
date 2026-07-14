@@ -231,6 +231,9 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                 <span class=move || {
                     if view.connected.get() { "dot online" } else { "dot offline" }
                 }></span>
+                // Read-aloud toggle (issue #18): speaks completed replies via the
+                // browser's SpeechSynthesis. Self-hiding when the API is absent.
+                {crate::read_aloud::read_aloud_toggle(view)}
                 <button class="icon-btn" aria-label="Open settings" on:click=open_settings>
                     "\u{2699}"
                 </button>

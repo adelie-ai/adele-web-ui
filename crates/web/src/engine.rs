@@ -48,6 +48,13 @@ pub struct ViewSignals {
     pub streaming: RwSignal<String>,
     pub streaming_active: RwSignal<bool>,
     pub send_enabled: RwSignal<bool>,
+    // --- Read-aloud (issue #18) ----------------------------------------------
+    /// The most recently *completed* assistant reply, as `(request_id, text)`,
+    /// set on every `StreamComplete` (local or cross-client). The read-aloud
+    /// toggle watches this to speak finished replies via the browser's
+    /// `SpeechSynthesis`; the `request_id` lets it dedup a re-delivered
+    /// completion. `None` until the first reply of the session completes.
+    pub last_completed_reply: RwSignal<Option<(String, String)>>,
     // --- Model selection (issue #9) ------------------------------------------
     /// Chat-capable models offered across every healthy connection, refreshed on
     /// each (re)connect. Empty means the picker hides (e.g. no connections).
@@ -162,6 +169,7 @@ impl ViewSignals {
             streaming: RwSignal::new(String::new()),
             streaming_active: RwSignal::new(false),
             send_enabled: RwSignal::new(true),
+            last_completed_reply: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             model_picker_visible: RwSignal::new(false),
             active_model: RwSignal::new(None),
@@ -232,6 +240,17 @@ impl Engine {
         match &msg {
             UiMessage::Connected { .. } => self.view.connected.set(true),
             UiMessage::Disconnected { .. } => self.view.connected.set(false),
+            // Read-aloud (issue #18): surface each completed reply for the toggle
+            // to speak. Carries the `request_id` so a re-delivered completion
+            // (cross-client echo) can be deduped; the reducer still owns the
+            // transcript, this is only a spoken-output tap.
+            UiMessage::StreamComplete {
+                request_id,
+                full_response,
+            } => self
+                .view
+                .last_completed_reply
+                .set(Some((request_id.clone(), full_response.clone()))),
             _ => {}
         }
         for effect in self.state.apply(msg) {

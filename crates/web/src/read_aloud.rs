@@ -37,7 +37,9 @@ pub enum SpeechAction {
 /// the reactive UI owns the single source of truth for the toggle.
 #[derive(Default)]
 pub struct ReadAloud {
-    // Filled in by the implementing commit.
+    /// The `request_id` of the last reply spoken aloud, so a re-delivery of the
+    /// same completion is not spoken twice. Reset on a conversation change.
+    last_spoken_request: Option<String>,
 }
 
 impl ReadAloud {
@@ -47,28 +49,166 @@ impl ReadAloud {
 
     /// Decide what to speak when an assistant reply *completes*. Speaks the reply
     /// iff the toggle is `enabled`, the text is not blank, and this `request_id`
-    /// has not already been spoken. Stub: unimplemented (the spec commit).
+    /// has not already been spoken (recording it so a re-delivered `StreamComplete`
+    /// — a cross-client echo of the same turn — is not spoken again). A reply seen
+    /// while disabled is deliberately *not* recorded, so it can still be spoken if
+    /// re-evaluated once enabled.
     pub fn on_completed_reply(
         &mut self,
-        _enabled: bool,
-        _request_id: &str,
-        _text: &str,
+        enabled: bool,
+        request_id: &str,
+        text: &str,
     ) -> SpeechAction {
-        SpeechAction::Silent
+        if !enabled {
+            return SpeechAction::Silent;
+        }
+        if self.last_spoken_request.as_deref() == Some(request_id) {
+            return SpeechAction::Silent;
+        }
+        if text.trim().is_empty() {
+            return SpeechAction::Silent;
+        }
+        self.last_spoken_request = Some(request_id.to_string());
+        SpeechAction::Speak(text.to_string())
     }
 
     /// Decide what to do when the toggle is flipped. Turning it *off* cancels any
     /// speech in progress; turning it *on* is silent (it never retro-speaks an
-    /// already-completed reply). Stub: unimplemented (the spec commit).
-    pub fn on_toggle(&self, _now_enabled: bool) -> SpeechAction {
-        SpeechAction::Silent
+    /// already-completed reply — the speak path only fires on a *new* completion).
+    pub fn on_toggle(&self, now_enabled: bool) -> SpeechAction {
+        if now_enabled {
+            SpeechAction::Silent
+        } else {
+            SpeechAction::Cancel
+        }
     }
 
     /// Decide what to do when the open conversation changes. Speech from the
     /// previous conversation is cancelled and the dedup state is reset so the new
-    /// conversation starts clean. Stub: unimplemented (the spec commit).
+    /// conversation starts clean.
     pub fn on_conversation_change(&mut self) -> SpeechAction {
-        SpeechAction::Silent
+        self.last_spoken_request = None;
+        SpeechAction::Cancel
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use view::read_aloud_toggle;
+
+#[cfg(target_arch = "wasm32")]
+mod view {
+    use std::cell::RefCell;
+
+    use leptos::prelude::*;
+
+    use super::{ReadAloud, SpeechAction};
+    use crate::engine::ViewSignals;
+
+    /// The header read-aloud control. **Capability-detected**: when the browser
+    /// has no `speechSynthesis` it renders nothing (`Option<_>: IntoView`), so the
+    /// toggle is simply absent rather than a dead control. Otherwise it wires the
+    /// toggle to the pure [`ReadAloud`] core and the browser synthesizer.
+    pub fn read_aloud_toggle(view: ViewSignals) -> impl IntoView {
+        synth::available().then(|| toggle(view))
+    }
+
+    fn toggle(view: ViewSignals) -> impl IntoView {
+        let enabled = RwSignal::new(false);
+        // The dedup core, shared (as a `Copy` handle) by the two effects and the
+        // click handler — all on the single CSR thread, so a `RefCell` suffices.
+        let core = StoredValue::new_local(RefCell::new(ReadAloud::new()));
+
+        // Speak each newly-completed assistant reply while the toggle is on. Reads
+        // `last_completed_reply` reactively (set by the engine on `StreamComplete`)
+        // but `enabled` untracked, so flipping the toggle never retro-speaks the
+        // last reply — only a genuinely new completion drives this.
+        Effect::new(move |_| {
+            let Some((request_id, text)) = view.last_completed_reply.get() else {
+                return;
+            };
+            let action = core.with_value(|c| {
+                c.borrow_mut()
+                    .on_completed_reply(enabled.get_untracked(), &request_id, &text)
+            });
+            apply(action);
+        });
+
+        // Switching the open conversation stops any speech from the previous one.
+        // `current_conversation_id` is re-set every dispatch, so guard on an actual
+        // change (and skip the initial `None -> Some` load, which has nothing to
+        // cancel) to avoid churning cancels.
+        Effect::new(move |prev: Option<Option<String>>| {
+            let current = view.current_conversation_id.get();
+            if let Some(previous) = prev
+                && previous.is_some()
+                && previous != current
+            {
+                apply(core.with_value(|c| c.borrow_mut().on_conversation_change()));
+            }
+            current
+        });
+
+        let on_click = move |_| {
+            let now = !enabled.get_untracked();
+            enabled.set(now);
+            apply(core.with_value(|c| c.borrow().on_toggle(now)));
+        };
+
+        view! {
+            <button
+                class="read-aloud-toggle icon-btn"
+                class:active=move || enabled.get()
+                aria-label="Read replies aloud"
+                aria-pressed=move || if enabled.get() { "true" } else { "false" }
+                on:click=on_click
+            >
+                {move || if enabled.get() { "\u{1f50a}" } else { "\u{1f507}" }}
+            </button>
+        }
+    }
+
+    /// Carry out a [`SpeechAction`] against the browser synthesizer.
+    fn apply(action: SpeechAction) {
+        match action {
+            SpeechAction::Speak(text) => synth::speak(&text),
+            SpeechAction::Cancel => synth::cancel(),
+            SpeechAction::Silent => {}
+        }
+    }
+
+    /// The browser `SpeechSynthesis` glue, isolated so the rest of the module is
+    /// DOM-free. Capability detection lives here too.
+    mod synth {
+        use wasm_bindgen::JsValue;
+        use web_sys::{SpeechSynthesis, SpeechSynthesisUtterance};
+
+        /// The browser speech synthesizer, if genuinely present. `speechSynthesis`
+        /// is bound as a `catch` getter, which wraps a *missing* property as a
+        /// value over `undefined` rather than an `Err`; verify the object is real
+        /// before handing it back, so capability detection is honest.
+        fn get() -> Option<SpeechSynthesis> {
+            let synth = web_sys::window()?.speech_synthesis().ok()?;
+            let value: &JsValue = synth.as_ref();
+            (!value.is_undefined() && !value.is_null()).then_some(synth)
+        }
+
+        pub fn available() -> bool {
+            get().is_some()
+        }
+
+        pub fn speak(text: &str) {
+            if let Some(synth) = get()
+                && let Ok(utterance) = SpeechSynthesisUtterance::new_with_text(text)
+            {
+                synth.speak(&utterance);
+            }
+        }
+
+        pub fn cancel() {
+            if let Some(synth) = get() {
+                synth.cancel();
+            }
+        }
     }
 }
 
@@ -103,7 +243,10 @@ mod tests {
             ra.on_completed_reply(true, "r1", "one"),
             SpeechAction::Speak("one".to_string())
         );
-        assert_eq!(ra.on_completed_reply(true, "r1", "one"), SpeechAction::Silent);
+        assert_eq!(
+            ra.on_completed_reply(true, "r1", "one"),
+            SpeechAction::Silent
+        );
     }
 
     #[test]
@@ -134,7 +277,10 @@ mod tests {
         // re-evaluated once enabled it still speaks (the toggle isn't a mute that
         // silently swallows the pending reply).
         let mut ra = ReadAloud::new();
-        assert_eq!(ra.on_completed_reply(false, "r1", "hi"), SpeechAction::Silent);
+        assert_eq!(
+            ra.on_completed_reply(false, "r1", "hi"),
+            SpeechAction::Silent
+        );
         assert_eq!(
             ra.on_completed_reply(true, "r1", "hi"),
             SpeechAction::Speak("hi".to_string())

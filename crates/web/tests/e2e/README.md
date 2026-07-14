@@ -157,3 +157,27 @@ summary logic it renders is unit-tested under `just check` in `src/scratchpad.rs
 ```sh
 cd tests/e2e && npm run test:scratchpad
 ```
+
+## `read_aloud.mjs`
+
+Browser check for read-aloud (issue #18). The browser's Web Speech API
+(`window.speechSynthesis`) is **stubbed via `page.addInitScript`** before the SPA
+loads — a browser API can only be observed by spying on it — recording every
+`.speak(utterance.text)` and `.cancel()` on `window.__ra`. A minimal fake BFF
+acks a sent message and streams the turn's `assistant_delta` + `assistant_completed`
+so a reply genuinely completes. It drives the real client in headless Chromium and
+asserts: (1) with the API present the toggle is shown and, while ON, a completed
+reply is spoken with the reply's text; (2) toggling OFF mid-reply calls
+`cancel()`, and a reply that completes while OFF is NOT spoken (the toggle gates
+output, and the same reply is never double-spoken); (3) with `speechSynthesis`
+stubbed **absent** the toggle is hidden and the app still sends/receives a turn
+without error — capability detection degrades gracefully. Fails on any uncaught
+wasm panic.
+
+The pure decision core (enable / dedup / blank-skip / cancel) is unit-tested under
+`just check` in `src/read_aloud.rs`; this covers only the browser SpeechSynthesis
++ reactive-DOM layer those host tests can't reach.
+
+```sh
+cd tests/e2e && npm run test:read-aloud
+```
