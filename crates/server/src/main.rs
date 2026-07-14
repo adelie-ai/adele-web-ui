@@ -12,6 +12,7 @@ mod auth;
 mod config;
 mod forward;
 mod relay;
+mod subs_forward;
 mod ws_auth;
 
 use std::sync::Arc;
