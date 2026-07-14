@@ -46,6 +46,7 @@ pub enum SettingsPanel {
     Personality,
     GlobalPersonality,
     Scratchpad,
+    KnowledgeBase,
 }
 
 impl SettingsPanel {
@@ -57,6 +58,7 @@ impl SettingsPanel {
         SettingsPanel::Personality,
         SettingsPanel::GlobalPersonality,
         SettingsPanel::Scratchpad,
+        SettingsPanel::KnowledgeBase,
     ];
 
     fn title(self) -> &'static str {
@@ -67,6 +69,7 @@ impl SettingsPanel {
             SettingsPanel::Personality => "Personality",
             SettingsPanel::GlobalPersonality => "Global Personality",
             SettingsPanel::Scratchpad => "Scratchpad",
+            SettingsPanel::KnowledgeBase => "Knowledge",
         }
     }
 
@@ -79,6 +82,7 @@ impl SettingsPanel {
             SettingsPanel::Personality => "\u{1f3ad}",       // performing arts / masks
             SettingsPanel::GlobalPersonality => "\u{1f310}", // globe with meridians
             SettingsPanel::Scratchpad => "\u{1f4dd}",        // memo / spiral notepad
+            SettingsPanel::KnowledgeBase => "\u{1f4da}",     // books
         }
     }
 }
@@ -170,6 +174,7 @@ fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> 
             crate::global_personality::global_personality_panel(engine, view).into_any()
         }
         SettingsPanel::Scratchpad => crate::scratchpad::scratchpad_panel(engine, view).into_any(),
+        SettingsPanel::KnowledgeBase => crate::knowledge::knowledge_panel(engine, view).into_any(),
     }
 }
 

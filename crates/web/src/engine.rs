@@ -157,6 +157,21 @@ pub struct ViewSignals {
     /// A switch clears it (empty) until the fetch returns, so notes never linger
     /// across conversations.
     pub scratchpad: RwSignal<Vec<ScratchpadNoteView>>,
+    // --- Knowledge base (issue #19) ------------------------------------------
+    // Read-only browse/search of the user's long-term KB, loaded on demand into
+    // these signals like the connections/purposes panels (the shared reducer
+    // doesn't model KB state). Both the browse (`ListKnowledgeEntries`) and
+    // search (`SearchKnowledgeEntries`) commands blind-forward through the BFF.
+    /// The current KB result page — the most-recent entries (browse) or a
+    /// search's hits. Empty until the panel first loads.
+    pub knowledge_entries: RwSignal<Vec<desktop_assistant_api_model::KnowledgeEntryView>>,
+    /// True while a KB browse/search RPC is in flight (drives the loading hint).
+    pub knowledge_busy: RwSignal<bool>,
+    /// Whether the KB list has loaded at least once — distinguishes "loading" from
+    /// "loaded, but empty" for the panel's empty state.
+    pub knowledge_loaded: RwSignal<bool>,
+    /// The last KB-panel error, or `None`. Cleared when a load starts.
+    pub knowledge_error: RwSignal<Option<String>>,
 }
 
 impl ViewSignals {
@@ -195,6 +210,10 @@ impl ViewSignals {
             global_personality_loaded: RwSignal::new(false),
             global_personality_busy: RwSignal::new(false),
             scratchpad: RwSignal::new(Vec::new()),
+            knowledge_entries: RwSignal::new(Vec::new()),
+            knowledge_busy: RwSignal::new(false),
+            knowledge_loaded: RwSignal::new(false),
+            knowledge_error: RwSignal::new(None),
         }
     }
 }
@@ -1085,6 +1104,69 @@ impl Engine {
         if let Some(id) = self.state.current_conversation_id.clone() {
             self.spawn_fetch_scratchpad(id);
         }
+    }
+
+    // --- Knowledge base (issue #19) ------------------------------------------
+    //
+    // Read-only browse/search over the daemon's client-facing KB commands. The
+    // shared reducer doesn't model KB state, so — like connections/purposes —
+    // both spawns write results straight into the view signals. Both commands
+    // blind-forward through the BFF to the daemon (no BFF change). The daemon
+    // owns KB *writes* (the assistant's tools + the dream cycle); the web client
+    // only reads.
+
+    /// Load the most-recent KB entries (browse mode) into `knowledge_entries`.
+    /// Called on the panel's first open and its Refresh / Clear-search actions.
+    pub fn refresh_knowledge(&self) {
+        self.load_knowledge(Command::ListKnowledgeEntries {
+            limit: crate::knowledge::KB_LIMIT,
+            offset: 0,
+            tag_filter: None,
+        });
+    }
+
+    /// Run a server-side KB search for `query`, loading the hits into
+    /// `knowledge_entries`. The panel passes only non-empty, trimmed queries
+    /// (`knowledge::normalize_query`); an empty box browses instead.
+    pub fn search_knowledge(&self, query: String) {
+        self.load_knowledge(Command::SearchKnowledgeEntries {
+            query,
+            tag_filter: None,
+            limit: crate::knowledge::KB_LIMIT,
+        });
+    }
+
+    /// Shared spawn behind [`refresh_knowledge`] / [`search_knowledge`]: issue
+    /// `command`, expect [`CommandResult::KnowledgeEntries`], and mirror the page
+    /// (or an error) into the panel's signals. Last-good results stay visible
+    /// while a load is in flight (no flicker); a failure surfaces on the error
+    /// banner and leaves them intact. A missing transport means we're between
+    /// connections, so the action is dropped.
+    fn load_knowledge(&self, command: Command) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        view.knowledge_busy.set(true);
+        view.knowledge_error.set(None);
+        spawn_local(async move {
+            match transport.send_command(command).await {
+                Ok(CommandResult::KnowledgeEntries(entries)) => {
+                    view.knowledge_entries.set(entries);
+                    view.knowledge_loaded.set(true);
+                }
+                Ok(other) => {
+                    view.knowledge_error.set(Some(format!(
+                        "unexpected reply to a knowledge command: {other:?}"
+                    )));
+                }
+                Err(e) => {
+                    view.knowledge_error
+                        .set(Some(format!("Knowledge base error: {e}")));
+                }
+            }
+            view.knowledge_busy.set(false);
+        });
     }
 
     fn spawn_create_conversation(&self) {

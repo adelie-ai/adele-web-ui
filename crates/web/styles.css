@@ -1124,6 +1124,106 @@ button {
   font-family: ui-monospace, monospace;
 }
 
+/* --- Knowledge base panel -------------------------------------------------- */
+/* Read-only browse/search of the user's long-term KB (issue #19): a search box
+   over a list of accordion rows. Each row header clears 44px; opening a row
+   reveals the entry's full content. Tags render as pill chips. */
+.kb-search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.kb-search .conn-input {
+  flex: 1 1 auto;
+}
+
+.kb-search-btn {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+}
+
+.kb-entry {
+  border-bottom: 1px solid var(--border);
+}
+
+.knowledge-panel .kb-entry:last-of-type {
+  border-bottom: none;
+}
+
+.kb-entry-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  padding: 12px 0;
+  text-align: left;
+  color: var(--fg);
+  background: none;
+  border: none;
+}
+
+.kb-entry.expanded .kb-entry-head {
+  color: var(--accent);
+}
+
+.kb-snippet {
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.kb-entry-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.kb-meta {
+  font-size: 12px;
+}
+
+.kb-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kb-tag {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.kb-entry-detail {
+  padding: 0 0 14px;
+}
+
+.kb-full-content {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+  background: var(--bubble-assistant);
+  border-radius: 10px;
+}
+
 @keyframes backdrop-in {
   from {
     opacity: 0;

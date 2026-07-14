@@ -32,6 +32,8 @@ mod context;
 #[cfg(any(target_arch = "wasm32", test))]
 mod global_personality;
 #[cfg(any(target_arch = "wasm32", test))]
+mod knowledge;
+#[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]
 mod personality;
