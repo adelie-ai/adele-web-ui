@@ -19,6 +19,7 @@ use wasm_bindgen_futures::spawn_local;
 use client_ui_common::UiMessage;
 
 use crate::engine::{Engine, ViewSignals};
+use crate::settings::{self, SettingsPanel, SettingsSheet};
 use crate::{auth, transport};
 
 /// Root component. Shows the login screen until a token is present, then the
@@ -170,10 +171,21 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
         }
     };
 
-    let sign_out = move |_| {
-        auth::clear_token();
-        session.set(None);
-    };
+    // Settings drawer: `None` = closed, `Some(panel)` = open on that panel. The
+    // gear opens the drawer root; the model pill jumps straight to the Model
+    // panel — both hang off the same host so future panels are drop-in.
+    let settings_open = RwSignal::new(None::<SettingsPanel>);
+    let open_settings = move |_| settings_open.set(Some(SettingsPanel::default()));
+    let open_model = move |_| settings_open.set(Some(SettingsPanel::Model));
+
+    // A `Copy`, `Send` handle to the `!Send` engine, so the settings drawer's
+    // reactive children can reach it (see `settings::EngineHandle`). The engine
+    // loop / composer keep using the `Rc` directly (they live in `spawn_local`
+    // tasks and top-level event handlers, which don't require `Send`).
+    let engine_handle: settings::EngineHandle = StoredValue::new_local(engine.clone());
+
+    // The toast is a transient view concern; dismissing it just clears the signal.
+    let dismiss_toast = move |_| view.toast.set(None);
 
     view! {
         <main class="app-shell chat">
@@ -184,11 +196,36 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                         if t.is_empty() { "Adele".to_string() } else { t }
                     }}
                 </span>
+                <Show when=move || view.model_picker_visible.get()>
+                    <button
+                        class="model-pill"
+                        aria-label="Choose model for this conversation"
+                        on:click=open_model
+                    >
+                        {move || {
+                            settings::model_button_label(
+                                &view.models.get(),
+                                &view.active_model.get(),
+                            )
+                        }}
+                    </button>
+                </Show>
                 <span class=move || {
                     if view.connected.get() { "dot online" } else { "dot offline" }
                 }></span>
-                <button class="link" on:click=sign_out>"Sign out"</button>
+                <button class="icon-btn" aria-label="Open settings" on:click=open_settings>
+                    "\u{2699}"
+                </button>
             </header>
+
+            <Show when=move || view.toast.get().is_some()>
+                <div class="toast" role="status">
+                    <span>{move || view.toast.get().unwrap_or_default()}</span>
+                    <button class="icon-btn" aria-label="Dismiss" on:click=dismiss_toast>
+                        "\u{2715}"
+                    </button>
+                </div>
+            </Show>
 
             <section class="messages">
                 {move || {
@@ -219,6 +256,13 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                     "Send"
                 </button>
             </form>
+
+            <SettingsSheet
+                engine=engine_handle
+                view=view
+                open=settings_open
+                session=session
+            />
         </main>
     }
 }

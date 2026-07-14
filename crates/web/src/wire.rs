@@ -74,6 +74,19 @@ pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
             conversation_id,
             title,
         },
+        // A pinned model selection stopped resolving (connection removed / model
+        // delisted). The daemon has already cleared it and fallen back; the
+        // reducer clears the picker and raises a toast (issue #9). This is the
+        // only path that surfaces the warning — `GetConversation`'s `warnings`
+        // are dropped by `client-common`'s `ConversationView -> ConversationDetail`
+        // conversion, so the live event is what clients act on.
+        Event::ConversationWarningEmitted {
+            conversation_id,
+            warning,
+        } => UiMessage::ConversationWarning {
+            conversation_id,
+            warning,
+        },
         _ => return None,
     };
     Some(msg)
@@ -236,6 +249,28 @@ mod tests {
         assert!(matches!(
             event_to_ui_message(ev),
             Some(UiMessage::ConversationListChanged { conversation_id }) if conversation_id == "c1"
+        ));
+    }
+
+    #[test]
+    fn conversation_warning_emitted_maps_to_typed_warning() {
+        use desktop_assistant_api_model::{ConversationModelSelectionView, ConversationWarning};
+        let selection = |conn: &str, model: &str| ConversationModelSelectionView {
+            connection_id: conn.to_string(),
+            model_id: model.to_string(),
+            effort: None,
+        };
+        let ev = Event::ConversationWarningEmitted {
+            conversation_id: "c1".to_string(),
+            warning: ConversationWarning::DanglingModelSelection {
+                previous_selection: selection("gone", "ghost"),
+                fallback_to: selection("openai", "gpt-4o"),
+            },
+        };
+        assert!(matches!(
+            event_to_ui_message(ev),
+            Some(UiMessage::ConversationWarning { conversation_id, warning: ConversationWarning::DanglingModelSelection { .. } })
+                if conversation_id == "c1"
         ));
     }
 
