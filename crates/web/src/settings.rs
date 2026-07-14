@@ -44,6 +44,8 @@ pub enum SettingsPanel {
     Connections,
     Purposes,
     Personality,
+    GlobalPersonality,
+    Scratchpad,
 }
 
 impl SettingsPanel {
@@ -53,6 +55,8 @@ impl SettingsPanel {
         SettingsPanel::Connections,
         SettingsPanel::Purposes,
         SettingsPanel::Personality,
+        SettingsPanel::GlobalPersonality,
+        SettingsPanel::Scratchpad,
     ];
 
     fn title(self) -> &'static str {
@@ -61,16 +65,20 @@ impl SettingsPanel {
             SettingsPanel::Connections => "Connections",
             SettingsPanel::Purposes => "Purposes",
             SettingsPanel::Personality => "Personality",
+            SettingsPanel::GlobalPersonality => "Global Personality",
+            SettingsPanel::Scratchpad => "Scratchpad",
         }
     }
 
     /// A leading glyph for the nav tab (decorative; the title carries meaning).
     fn icon(self) -> &'static str {
         match self {
-            SettingsPanel::Model => "\u{1f9e0}",       // brain
-            SettingsPanel::Connections => "\u{1f50c}", // electric plug
-            SettingsPanel::Purposes => "\u{1f3af}",    // direct hit / target
-            SettingsPanel::Personality => "\u{1f3ad}", // performing arts / masks
+            SettingsPanel::Model => "\u{1f9e0}",             // brain
+            SettingsPanel::Connections => "\u{1f50c}",       // electric plug
+            SettingsPanel::Purposes => "\u{1f3af}",          // direct hit / target
+            SettingsPanel::Personality => "\u{1f3ad}",       // performing arts / masks
+            SettingsPanel::GlobalPersonality => "\u{1f310}", // globe with meridians
+            SettingsPanel::Scratchpad => "\u{1f4dd}",        // memo / spiral notepad
         }
     }
 }
@@ -158,6 +166,10 @@ fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> 
         SettingsPanel::Personality => {
             crate::personality::personality_panel(engine, view).into_any()
         }
+        SettingsPanel::GlobalPersonality => {
+            crate::global_personality::global_personality_panel(engine, view).into_any()
+        }
+        SettingsPanel::Scratchpad => crate::scratchpad::scratchpad_panel(engine, view).into_any(),
     }
 }
 

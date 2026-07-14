@@ -113,3 +113,47 @@ check` in `src/personality.rs`.
 ```sh
 cd tests/e2e && npm run test:personality
 ```
+
+## `global_personality_panel.mjs`
+
+Browser check for the global personality panel (issue #17). Serves the built SPA
+from a **stateful** fake BFF that holds a single global `Config` and mutates its
+`personality` block on `set_config` (applying the `ConfigChanges`), returning the
+config from both `get_config` and `set_config`. It drives the real client
+round-trip in headless Chromium: open Settings → Global Personality, confirm the
+seven traits pre-fill from the daemon's config (Expressive-7 defaults, every
+trait a **concrete** level with exactly five options and **no** "Global
+(inherit)" sentinel — unlike the per-conversation panel), change
+`professionalism = Never` and `humor = Always`, **Save** (→ `SetConfig`), then
+**reload the whole page** and assert the panel re-fills those two edits from the
+stored config (`GetConfig`) while the untouched traits are unchanged — i.e. the
+global change genuinely persists. Fails on any uncaught wasm panic.
+
+The stateful fake keeps this deterministic and isolated from the shared local
+daemon. The pure trait ⇄ config + `Personality` → `ConfigChanges` mapping it
+renders is unit-tested under `just check` in `src/global_personality.rs`.
+
+```sh
+cd tests/e2e && npm run test:global-personality
+```
+## `scratchpad_view.mjs`
+
+Browser check for the read-only conversation scratchpad panel (issue #16). The
+reducer fetches the active conversation's scratchpad on load and re-fetches
+after every completed turn, so the **stateful** fake BFF answers
+`get_conversation_scratchpad` with a note set that **changes** once a message is
+sent. It drives the real client in headless Chromium: open Settings →
+Scratchpad, assert the notes render grouped by type (a todo with an open
+checkbox + a plain note) with a `2 notes · 0 of 1 done` summary; then send a
+turn, reopen the panel, and assert it **updated in place** — the todo now struck
+through/done, a newly-added todo present, and a `3 notes · 1 of 2 done` summary.
+This proves the whole wire→reducer→engine→DOM refresh path. Fails on any
+uncaught wasm panic.
+
+The stateful fake keeps this deterministic and isolated from the shared local
+daemon (it never touches data it didn't create). The pure grouping/labelling/
+summary logic it renders is unit-tested under `just check` in `src/scratchpad.rs`.
+
+```sh
+cd tests/e2e && npm run test:scratchpad
+```

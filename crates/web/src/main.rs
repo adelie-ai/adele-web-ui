@@ -21,13 +21,16 @@ mod transport;
 // round-trips), the model-selection helpers (issue #9), the connection form ⇄
 // config mapping + credential logic (issue #10), the purposes slot/config
 // mapping (issue #11), the personality trait ⇄ override mapping (issue #13),
-// and the transport's request/reply timeout core. Each
+// the global personality trait ⇄ config mapping (issue #17), and the
+// transport's request/reply timeout core. Each
 // pairs its pure logic with a `#[cfg(target_arch = "wasm32")]` Leptos view
 // where it has one.
 #[cfg(any(target_arch = "wasm32", test))]
 mod connections;
 #[cfg(any(target_arch = "wasm32", test))]
 mod context;
+#[cfg(any(target_arch = "wasm32", test))]
+mod global_personality;
 #[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -36,6 +39,8 @@ mod personality;
 mod purposes;
 #[cfg(any(target_arch = "wasm32", test))]
 mod reply;
+#[cfg(any(target_arch = "wasm32", test))]
+mod scratchpad;
 #[cfg(any(target_arch = "wasm32", test))]
 mod sidebar;
 #[cfg(any(target_arch = "wasm32", test))]
