@@ -184,9 +184,11 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
     // tasks and top-level event handlers, which don't require `Send`).
     let engine_handle: settings::EngineHandle = StoredValue::new_local(engine.clone());
 
-    // Conversation switcher drawer (issue #12): `false` = closed. Opening
-    // refreshes the list (load-on-open) so it reflects conversations added or
-    // removed elsewhere; live push is out of scope (#15).
+    // Conversation switcher drawer (issue #12): `false` = closed. The list now
+    // updates live from other-client changes (#15) — a `ConversationListChanged`
+    // event drives the reducer to refetch and repaint the sidebar. This
+    // load-on-open refetch is a cheap resync backstop (e.g. after a missed event
+    // while the socket was down).
     let sidebar_open = RwSignal::new(false);
     let open_sidebar = move |_| {
         engine_handle.with_value(|e| e.borrow().refresh_conversation_list());

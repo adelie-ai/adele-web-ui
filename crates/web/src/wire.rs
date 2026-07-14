@@ -285,6 +285,67 @@ mod tests {
     }
 
     #[test]
+    fn live_sync_event_set_all_map() {
+        // Live multi-client sync (#15) depends on the daemon's fanned-out
+        // cross-client events reaching the reducer. Pin the exact set the SPA
+        // surfaces live so a future reshape of the match (or a new `Event`
+        // variant) can't let one silently fall through the `_` arm to `None`:
+        // every event here MUST map to a `UiMessage` the reducer acts on
+        // (message-added, the streaming trio + status, per-turn usage, and the
+        // conversation title/list changes that drive the switcher). This
+        // complements the per-variant tests above (which pin each mapping's
+        // fields) by asserting the coverage SET as one contract.
+        let live_sync_events = [
+            Event::UserMessageAdded {
+                conversation_id: "c1".to_string(),
+                request_id: "r1".to_string(),
+                content: "hi".to_string(),
+            },
+            Event::AssistantDelta {
+                conversation_id: "c1".to_string(),
+                request_id: "r1".to_string(),
+                chunk: "he".to_string(),
+            },
+            Event::AssistantCompleted {
+                conversation_id: "c1".to_string(),
+                request_id: "r1".to_string(),
+                full_response: "hello".to_string(),
+            },
+            Event::AssistantError {
+                conversation_id: "c1".to_string(),
+                request_id: "r1".to_string(),
+                error: "boom".to_string(),
+            },
+            Event::AssistantStatus {
+                conversation_id: "c1".to_string(),
+                request_id: "r1".to_string(),
+                message: "searching".to_string(),
+            },
+            Event::ContextUsage {
+                conversation_id: "c1".to_string(),
+                request_id: "r1".to_string(),
+                used_tokens: 1,
+                budget_tokens: 2,
+                compaction_active: false,
+            },
+            Event::ConversationTitleChanged {
+                conversation_id: "c1".to_string(),
+                title: "Renamed".to_string(),
+            },
+            Event::ConversationListChanged {
+                conversation_id: "c1".to_string(),
+            },
+        ];
+        for event in live_sync_events {
+            let label = format!("{event:?}");
+            assert!(
+                event_to_ui_message(event).is_some(),
+                "live-sync event must map to a UiMessage, but dropped to None: {label}"
+            );
+        }
+    }
+
+    #[test]
     fn scratchpad_changed_maps_through() {
         let ev = Event::ScratchpadChanged {
             conversation_id: "c1".to_string(),

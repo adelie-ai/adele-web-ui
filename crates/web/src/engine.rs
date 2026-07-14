@@ -273,9 +273,12 @@ impl Engine {
 
     /// Re-fetch the conversation list (list-only), delivered as
     /// `ConversationListRefetched` so the reducer repaints ONLY the sidebar and
-    /// never disturbs the open chat or model picker. Run when the drawer opens so
-    /// it reflects any conversations added/removed by another client (#12's
-    /// load-on-open; live push is out of scope, tracked as #15).
+    /// never disturbs the open chat or model picker. The same list-only refetch
+    /// backs live sync (#15): a `ConversationListChanged` event pushed by another
+    /// client drives the reducer to emit `RefetchConversationList`, which the
+    /// engine runs via `spawn_refetch_list` — so the sidebar updates live. This
+    /// method is the drawer's load-on-open call, a resync backstop for a change
+    /// missed while the socket was down.
     pub fn refresh_conversation_list(&self) {
         self.spawn_refetch_list();
     }
