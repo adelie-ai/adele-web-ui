@@ -15,6 +15,7 @@ dependencies = [
  "desktop-assistant-client-common",
  "desktop-assistant-ws",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tower-http",

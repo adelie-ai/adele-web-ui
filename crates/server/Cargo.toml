@@ -27,5 +27,10 @@ desktop-assistant-client-common.workspace = true
 desktop-assistant-api-model.workspace = true
 desktop-assistant-auth-jwt.workspace = true
 
+[dev-dependencies]
+# Only for tests: constructing a `SignalEvent::ClientToolCall`'s `serde_json::Value`
+# arguments to assert it is NOT relayed. The BFF proper carries no JSON of its own.
+serde_json.workspace = true
+
 [lints]
 workspace = true

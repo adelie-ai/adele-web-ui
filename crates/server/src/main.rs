@@ -11,12 +11,15 @@
 mod auth;
 mod config;
 mod forward;
+mod relay;
 mod ws_auth;
 
 use std::sync::Arc;
 
 use anyhow::Context;
 use axum::routing::get;
+use desktop_assistant_api_model as api;
+use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_auth_jwt::{default_signing_key_path, ensure_signing_key_at};
 use desktop_assistant_client_common::{ConnectionConfig, Connector, TransportMode};
 use desktop_assistant_ws::{WsAuthValidator, WsLoginService, WsServeConfig};
@@ -94,7 +97,47 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("connecting to the assistant daemon over {back_door}"))?;
     tracing::info!(daemon = connector.label(), "connected to daemon");
-    let handler = Arc::new(ForwardingHandler::new(Arc::new(connector)));
+    let connector = Arc::new(connector);
+
+    // Live multi-client sync + scratchpad push (#33 / #15 / #16). The shared
+    // browser-session registry is handed to BOTH the handler (so the embedded
+    // dispatcher registers each browser connection + its `SubscribeConversations`
+    // in it) and the background relay (which fans the daemon's cross-client /
+    // background events to those sessions).
+    let subs = Arc::new(ConversationSubscriptions::new());
+
+    // Subscribe the BFF's daemon connection to the per-user background broadcast
+    // so scratchpad / conversation-list changes (which ride it, not the per-turn
+    // stream) actually reach the relay. Best-effort: a failure here only disables
+    // those background pushes; turn relay + the SPA still work, so don't abort.
+    match connector.client().as_commands() {
+        Some(commands) => match commands
+            .send_command(api::Command::SubscribeBackgroundTasks)
+            .await
+        {
+            Ok(_) => tracing::info!("subscribed to daemon background events (scratchpad / list)"),
+            Err(e) => {
+                tracing::warn!(error = %e, "SubscribeBackgroundTasks failed; live scratchpad / list push disabled")
+            }
+        },
+        None => tracing::warn!(
+            "daemon transport has no command channel; live scratchpad / list push disabled"
+        ),
+    }
+
+    let handler = Arc::new(ForwardingHandler::new(
+        Arc::clone(&connector),
+        Arc::clone(&subs),
+    ));
+
+    // The relay outlives request handling; it drains the daemon signal stream for
+    // the process lifetime. `login_username` is the single-tenant user every
+    // browser session authenticates as (see `relay.rs` scope note / #20).
+    tokio::spawn(relay::run_relay(
+        Arc::clone(&connector),
+        Arc::clone(&subs),
+        config.login_username.clone(),
+    ));
 
     // Front door: reuse the daemon's ws-interface server (/ws, /login, /auth/config).
     // The browser-token `iss`/`aud` are config-resolved (default: hostname /
