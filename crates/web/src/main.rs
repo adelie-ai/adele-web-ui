@@ -18,7 +18,11 @@ mod transport;
 
 // Pure, view-free modules consumed by the UI on wasm and unit-tested on the
 // host: the wire-protocol mapping (`api::Event` -> `UiMessage`, frame
-// round-trips) and the model-selection helpers (issue #9).
+// round-trips), the model-selection helpers (issue #9), and the connection
+// form ⇄ config mapping + credential logic (issue #10). Each hosts a
+// `#[cfg(target_arch = "wasm32")]` Leptos view alongside its host-tested core.
+#[cfg(any(target_arch = "wasm32", test))]
+mod connections;
 #[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]
