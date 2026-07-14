@@ -18,14 +18,16 @@ mod transport;
 
 // Pure, view-free modules consumed by the UI on wasm and unit-tested on the
 // host: the wire-protocol mapping (`api::Event` -> `UiMessage`, frame
-// round-trips), the model-selection helpers (issue #9), and the purposes
-// slot/config mapping (issue #11). Each pairs its pure logic with a
-// `#[cfg(target_arch = "wasm32")]` Leptos view (purposes carries its panel in a
-// wasm-gated submodule).
+// round-trips), the model-selection helpers (issue #9), the purposes
+// slot/config mapping (issue #11), and the transport's request/reply timeout
+// core. Each pairs its pure logic with a `#[cfg(target_arch = "wasm32")]`
+// Leptos view where it has one.
 #[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]
 mod purposes;
+#[cfg(any(target_arch = "wasm32", test))]
+mod reply;
 #[cfg(any(target_arch = "wasm32", test))]
 mod wire;
 
