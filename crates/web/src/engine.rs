@@ -13,8 +13,8 @@ use std::rc::Rc;
 
 use desktop_assistant_api_model::client::ChatMessage;
 use desktop_assistant_api_model::{
-    Command, CommandResult, ConnectionView, ConversationModelSelectionView, EffortLevel,
-    ModelListing, PurposeConfigView, PurposeKindApi, PurposesView, SendPromptOverride,
+    Command, CommandResult, ConnectionConfigView, ConnectionView, ConversationModelSelectionView,
+    EffortLevel, ModelListing, PurposeConfigView, PurposeKindApi, PurposesView, SendPromptOverride,
 };
 use futures::channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
@@ -24,8 +24,15 @@ use client_ui_common::{
     Effect, SelectedModel, UiMessage, WindowState, interactive_default_from_purposes,
 };
 
+use crate::connections::{CredentialAction, secret_command};
 use crate::model;
 use crate::transport::Transport;
+
+/// A one-shot completion callback for a connections CRUD action (save/delete),
+/// invoked on the main thread with `Ok(())` on success or `Err(reason)` on
+/// failure. The connections panel uses it to close its form or surface an error
+/// (`Rc<dyn Fn>` because the engine is `!Send` and single-threaded).
+pub type ActionDone = Rc<dyn Fn(Result<(), String>)>;
 
 /// Reactive mirrors of the `WindowState` slices the UI renders. Every field is a
 /// `Copy` signal, so `ViewSignals` is `Copy` and drops cheaply into closures and
@@ -62,6 +69,17 @@ pub struct ViewSignals {
     pub effort: RwSignal<Option<EffortLevel>>,
     /// A one-shot passive toast (e.g. a dangling-model-selection fallback).
     pub toast: RwSignal<Option<String>>,
+    // --- Connections (issue #10) ---------------------------------------------
+    /// Every configured LLM connection, refreshed on demand by the Connections
+    /// panel via `ListConnections`. Panel-only state (not consumed by the chat).
+    pub connections: RwSignal<Vec<ConnectionView>>,
+    /// True while a connections RPC (list / save / delete) is in flight.
+    pub connections_busy: RwSignal<bool>,
+    /// The last connections-panel error, or `None`. Cleared when an action starts.
+    pub connections_error: RwSignal<Option<String>>,
+    /// Whether the list has loaded at least once — distinguishes "loading" from
+    /// "loaded, but empty" for the panel's empty state.
+    pub connections_loaded: RwSignal<bool>,
     // --- Purposes (issue #11) -------------------------------------------------
     // Web-only view state: the shared reducer doesn't own purpose routing, so the
     // panel's data is loaded on demand and written straight to these signals
@@ -95,6 +113,10 @@ impl ViewSignals {
             stored_selection: RwSignal::new(None),
             effort: RwSignal::new(None),
             toast: RwSignal::new(None),
+            connections: RwSignal::new(Vec::new()),
+            connections_busy: RwSignal::new(false),
+            connections_error: RwSignal::new(None),
+            connections_loaded: RwSignal::new(false),
             purposes: RwSignal::new(None),
             purpose_connections: RwSignal::new(Vec::new()),
             purpose_models: RwSignal::new(Vec::new()),
@@ -279,6 +301,119 @@ impl Engine {
                     let _ = tx.unbounded_send(UiMessage::Error(format!("refresh models: {e}")));
                 }
             }
+        });
+    }
+
+    // --- Connections (issue #10) ---------------------------------------------
+    //
+    // Self-contained CRUD over the command-RPC: unlike model selection, these
+    // aren't in the shared reducer, so the spawned tasks write the connection
+    // signals directly (the same single-threaded pattern the transport uses via
+    // the engine channel). Save/delete take an [`ActionDone`] the panel uses to
+    // close its form or surface an error; the list is refreshed after any write.
+
+    /// (Re)load the connection list. Sets `connections` + `connections_loaded`
+    /// on success, or `connections_error` on failure. Called when the panel opens.
+    pub fn refresh_connections(&self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        view.connections_busy.set(true);
+        view.connections_error.set(None);
+        spawn_local(async move {
+            if let Err(e) = load_connections_into(&transport, view).await {
+                view.connections_error
+                    .set(Some(format!("Failed to load connections: {e}")));
+            }
+            view.connections_busy.set(false);
+        });
+    }
+
+    /// Create (`editing_id == None`) or update a connection, then optionally
+    /// set/clear its credential, then refresh the list. Credential writes ride a
+    /// separate `SetConnectionSecret` after the config write lands (the daemon
+    /// requires the connection to exist first). `done` reports the outcome.
+    pub fn save_connection(
+        &self,
+        editing_id: Option<String>,
+        id: String,
+        config: ConnectionConfigView,
+        credential: Option<CredentialAction>,
+        done: ActionDone,
+    ) {
+        let Some(transport) = self.transport.clone() else {
+            done(Err(
+                "Not connected — try again once reconnected.".to_string()
+            ));
+            return;
+        };
+        let view = self.view;
+        view.connections_busy.set(true);
+        view.connections_error.set(None);
+        spawn_local(async move {
+            // The credential (if any) is keyed on the resolved id: the immutable
+            // edit id, else the freshly-created one.
+            let target_id = editing_id.clone().unwrap_or_else(|| id.clone());
+            let cmd = match &editing_id {
+                Some(existing) => Command::UpdateConnection {
+                    id: existing.clone(),
+                    config,
+                },
+                None => Command::CreateConnection {
+                    id: id.clone(),
+                    config,
+                },
+            };
+            if let Err(e) = ack(transport.send_command(cmd).await, "save connection") {
+                view.connections_busy.set(false);
+                done(Err(e));
+                return;
+            }
+            if let Some(action) = credential {
+                let cmd = secret_command(target_id, action);
+                if let Err(e) = ack(transport.send_command(cmd).await, "set credential") {
+                    // Config saved; the credential step failed. Refresh so the
+                    // list reflects the saved config, and report the partial fail.
+                    let _ = load_connections_into(&transport, view).await;
+                    view.connections_busy.set(false);
+                    done(Err(format!(
+                        "Connection saved, but the credential update failed: {e}"
+                    )));
+                    return;
+                }
+            }
+            let refresh = load_connections_into(&transport, view).await;
+            view.connections_busy.set(false);
+            // A refresh failure post-write is non-fatal to the save itself.
+            match refresh {
+                Ok(()) => done(Ok(())),
+                Err(e) => done(Err(format!("Saved, but reloading the list failed: {e}"))),
+            }
+        });
+    }
+
+    /// Delete a connection (optionally forcing referencing purposes back to the
+    /// interactive purpose), then refresh the list. `done` reports the outcome —
+    /// the panel offers a force retry when a non-force delete is refused.
+    pub fn delete_connection(&self, id: String, force: bool, done: ActionDone) {
+        let Some(transport) = self.transport.clone() else {
+            done(Err(
+                "Not connected — try again once reconnected.".to_string()
+            ));
+            return;
+        };
+        let view = self.view;
+        view.connections_busy.set(true);
+        view.connections_error.set(None);
+        spawn_local(async move {
+            let cmd = Command::DeleteConnection { id, force };
+            let result = ack(transport.send_command(cmd).await, "delete connection");
+            if result.is_ok() {
+                let _ = load_connections_into(&transport, view).await;
+            }
+            view.connections_busy.set(false);
+            done(result);
         });
     }
 
@@ -640,6 +775,31 @@ fn list_conversations() -> Command {
     Command::ListConversations {
         max_age_days: None,
         include_archived: false,
+    }
+}
+
+/// Run `ListConnections` and store the result into the connection signals.
+/// Returns `Err` (leaving the signals untouched) on a transport/shape error so
+/// callers can surface it. Marks `connections_loaded` on success.
+async fn load_connections_into(transport: &Rc<Transport>, view: ViewSignals) -> Result<(), String> {
+    match transport.send_command(Command::ListConnections).await {
+        Ok(CommandResult::Connections(conns)) => {
+            view.connections.set(conns);
+            view.connections_loaded.set(true);
+            Ok(())
+        }
+        Ok(other) => Err(format!("unexpected reply to ListConnections: {other:?}")),
+        Err(e) => Err(e),
+    }
+}
+
+/// Collapse a command reply into `Ok(())` when it is the expected [`CommandResult::Ack`],
+/// or a human-readable `Err` for a transport error or an unexpected reply shape.
+fn ack(result: Result<CommandResult, String>, what: &str) -> Result<(), String> {
+    match result {
+        Ok(CommandResult::Ack) => Ok(()),
+        Ok(other) => Err(format!("unexpected reply to {what}: {other:?}")),
+        Err(e) => Err(e),
     }
 }
 

@@ -41,16 +41,22 @@ pub type EngineHandle = StoredValue<Rc<RefCell<Engine>>, LocalStorage>;
 pub enum SettingsPanel {
     #[default]
     Model,
+    Connections,
     Purposes,
 }
 
 impl SettingsPanel {
     /// Every panel, in nav order. Grows as parity panels land.
-    pub const ALL: &'static [SettingsPanel] = &[SettingsPanel::Model, SettingsPanel::Purposes];
+    pub const ALL: &'static [SettingsPanel] = &[
+        SettingsPanel::Model,
+        SettingsPanel::Connections,
+        SettingsPanel::Purposes,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             SettingsPanel::Model => "Model",
+            SettingsPanel::Connections => "Connections",
             SettingsPanel::Purposes => "Purposes",
         }
     }
@@ -58,8 +64,9 @@ impl SettingsPanel {
     /// A leading glyph for the nav tab (decorative; the title carries meaning).
     fn icon(self) -> &'static str {
         match self {
-            SettingsPanel::Model => "\u{1f9e0}",    // brain
-            SettingsPanel::Purposes => "\u{1f3af}", // direct hit / target
+            SettingsPanel::Model => "\u{1f9e0}",       // brain
+            SettingsPanel::Connections => "\u{1f50c}", // electric plug
+            SettingsPanel::Purposes => "\u{1f3af}",    // direct hit / target
         }
     }
 }
@@ -140,6 +147,9 @@ pub fn SettingsSheet(
 fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> AnyView {
     match panel {
         SettingsPanel::Model => model_panel(engine, view).into_any(),
+        SettingsPanel::Connections => {
+            crate::connections::connections_panel(engine, view).into_any()
+        }
         SettingsPanel::Purposes => crate::purposes::purposes_panel(engine, view).into_any(),
     }
 }

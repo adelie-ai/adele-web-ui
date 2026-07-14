@@ -526,6 +526,216 @@ button {
   padding: 8px 0;
 }
 
+/* --- Connections panel ----------------------------------------------------- */
+.conn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.conn-list > .panel-note {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+/* A connection card: status dot, id/type + status, actions. */
+.conn-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.conn-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.conn-dot.ok {
+  background: var(--ok);
+}
+
+.conn-dot.bad {
+  background: var(--danger);
+}
+
+.conn-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.conn-card-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-card-sub {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+/* Buttons shared across the list, confirm, and form. */
+.conn-btn {
+  min-height: 44px;
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.conn-btn:active {
+  background: var(--bubble-assistant);
+}
+
+.conn-btn.primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.conn-btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.conn-btn:disabled {
+  opacity: 0.6;
+}
+
+.conn-add {
+  margin-top: 6px;
+  width: 100%;
+}
+
+.conn-error {
+  margin: 4px 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: 10px;
+}
+
+/* Inline delete confirmation. */
+.conn-confirm {
+  padding: 12px;
+  background: var(--bubble-assistant);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: 12px;
+}
+
+.conn-confirm-q {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+/* --- Connection form ------------------------------------------------------- */
+.conn-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.conn-form-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.conn-form-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.conn-input {
+  width: 100%;
+  padding: 12px 14px;
+  font-size: 16px; /* >=16px: stops iOS Safari zoom-on-focus */
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.conn-input:disabled {
+  color: var(--muted);
+  background: var(--bubble-assistant);
+}
+
+.conn-cred {
+  padding: 12px;
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.conn-cred .conn-input {
+  background: var(--bg);
+}
+
+.conn-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.conn-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.conn-check input {
+  width: 20px;
+  height: 20px;
+}
+
+.conn-locked {
+  margin: 0;
+  padding: 10px 12px;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.conn-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.conn-form-actions .conn-btn {
+  flex: 1;
+}
+
 /* --- Purposes panel -------------------------------------------------------- */
 /* One stacked card per purpose. Native <select>s give touch-friendly pickers on
    phones; the effort control reuses the shared segmented control. */
