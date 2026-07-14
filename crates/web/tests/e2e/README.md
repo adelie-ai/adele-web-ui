@@ -50,6 +50,34 @@ bucketing, and the web-specific `aria_label` / `bar_percent` are unit-tested
 under `just check` (`client-ui-common`'s `context_usage` + `src/context.rs`);
 this covers only the browser-render + reactive-update layer they can't reach.
 
+## `live_multi_client_sync.mjs`
+
+Coverage for live multi-client sync (issue #15): the SPA reflecting activity in
+OTHER clients (gtk/tui/kde/voice) with no manual refresh. A **stateful** fake BFF
+speaks the real WS protocol and **pushes** server-initiated `WsFrame::Event`
+frames the browser did not ask for, simulating another client. It asserts, in the
+DOM: (1) on connect the SPA subscribes the open conversation (a
+`subscribe_conversations` command carrying its id is observed); (2) a pushed
+`user_message_added` + `assistant_delta` + `assistant_completed` for the open
+conversation render the external turn live (user bubble → streaming → finalised
+reply); (3) with the switcher drawer open, a pushed `conversation_title_changed`
+renames a row in place and a `conversation_list_changed` (the fake BFF's list now
+holding a new conversation) makes a new row appear — the reducer's refetch path;
+and (4) after a simulated socket drop the SPA reconnects and **re-subscribes**
+(a fresh `subscribe_conversations` for the open conversation), and a live event
+pushed *after* the reconnect still renders. This proves the whole
+event→`event_to_ui_message`→reducer→signals→DOM path in a real browser. The pure
+`Event → UiMessage` mapping it relies on is unit-tested under `just check`
+(`src/wire.rs`); the shared reducer's live-event handling lives in
+`client-ui-common`. Run with `npm run test:live-sync`.
+
+**Client scope:** this exercises the SPA's handling of pushed live events. The
+real BFF (`crates/server`) blind-forwards the `SubscribeConversations` *command*
+to the daemon, but its `ForwardingHandler` only relays a browser-initiated
+send-turn's own events back — relaying the daemon's fanned-out *cross-client*
+events to the browser is a separate `crates/server` follow-up. The client is
+correct the moment those frames arrive, which is what this fake BFF proves.
+
 ## Running
 
 ```sh
