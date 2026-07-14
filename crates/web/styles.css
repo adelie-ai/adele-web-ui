@@ -736,6 +736,87 @@ button {
   flex: 1;
 }
 
+/* --- Purposes panel -------------------------------------------------------- */
+/* One stacked card per purpose. Native <select>s give touch-friendly pickers on
+   phones; the effort control reuses the shared segmented control. */
+.purpose-card {
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.purpose-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.purpose-name {
+  font-weight: 600;
+}
+
+.purpose-badge {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+
+.purpose-hint {
+  margin: 2px 0 10px;
+  font-size: 13px;
+}
+
+.purpose-field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.sub-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* Native select styled to match the composer/login inputs, sized for touch. */
+.select {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 16px; /* >=16px: stops iOS Safari zoom-on-focus */
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.save-purpose {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 16px;
+  font-weight: 600;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+}
+
+.save-purpose:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.purpose-card .error {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
 @keyframes backdrop-in {
   from {
     opacity: 0;

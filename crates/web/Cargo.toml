@@ -25,6 +25,10 @@ client-ui-common = { path = "../../../client-ui-common" }
 desktop-assistant-api-model = { path = "../../../desktop-assistant/crates/api-model" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Async primitives (oneshot + combinators) used by the transport's request/reply
+# correlation. Kept on *both* targets so the timer-agnostic reply-timeout core
+# (`src/reply.rs`) compiles and unit-tests on the host, like `wire`/`model`.
+futures = "0.3"
 
 # --- Wasm-only dependencies ---------------------------------------------------
 # Excluded from the host build so `cargo test` (native) stays light and the pure
@@ -35,7 +39,6 @@ leptos = { version = "0.8", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["websocket", "http"] }
 gloo-storage = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
-futures = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"

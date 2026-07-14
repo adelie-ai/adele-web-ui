@@ -21,14 +21,23 @@ use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::Message;
 use gloo_net::websocket::futures::WebSocket;
+use gloo_timers::future::TimeoutFuture;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::reply::{ReplyOutcome, await_reply};
 use crate::wire::event_to_ui_message;
 use client_ui_common::UiMessage;
 
 /// Sentinel subprotocol offered alongside the JWT so the BFF can tell the marker
 /// from the token. Must match the server's `ws_auth::BEARER_SUBPROTOCOL`.
 pub const BEARER_SUBPROTOCOL: &str = "adele.bearer";
+
+/// How long [`Transport::send_command`] waits for a correlated reply before
+/// giving up. A generous backstop (not a tight SLA): normal replies land in
+/// well under a second, but a cold model refresh can enumerate a remote provider
+/// for several seconds, so this must clear that while still bounding a genuine
+/// stall so it can't hang the session forever.
+const REPLY_TIMEOUT_MS: u32 = 30_000;
 
 /// Build the same-origin `/ws` URL (`wss` under TLS, else `ws`) from the
 /// browser's current location. The SPA is served by the BFF (or proxied to it
@@ -80,8 +89,30 @@ impl Transport {
             self.pending.borrow_mut().remove(&id);
             return Err("transport closed".to_string());
         }
-        rx.await
-            .map_err(|_| "transport closed before reply".to_string())?
+
+        // Bound the wait. Without this, a reply that never arrives — a stalled
+        // daemon handler, a lost frame, or a frame the read pump can't deliver
+        // (an unparseable or non-text frame is dropped without resolving its
+        // request) — hangs this future *forever*. Because `start_initial_load`
+        // awaits its commands in sequence, a single such stall would otherwise
+        // brick the whole session: `Connected` never fires (the UI never goes
+        // online), conversations never load, chat never works, and the model
+        // picker stays empty with Refresh unable to recover. A timeout turns an
+        // undelivered reply into an ordinary error, honoring the "model/purpose
+        // load failures are non-fatal" contract the initial load documents.
+        match await_reply(rx, TimeoutFuture::new(REPLY_TIMEOUT_MS)).await {
+            ReplyOutcome::Reply(reply) => reply,
+            ReplyOutcome::TransportClosed => Err("transport closed before reply".to_string()),
+            ReplyOutcome::TimedOut => {
+                // The request is still registered; evict it so a late reply is
+                // ignored rather than resolving a dead one-shot.
+                self.pending.borrow_mut().remove(&id);
+                Err(format!(
+                    "no reply from server within {}s",
+                    REPLY_TIMEOUT_MS / 1000
+                ))
+            }
+        }
     }
 }
 
@@ -136,12 +167,18 @@ async fn read_pump(
     closed_tx: oneshot::Sender<()>,
 ) {
     while let Some(msg) = read.next().await {
-        let Ok(Message::Text(text)) = msg else {
-            // Bytes frames are unused; a read error ends the socket.
-            if msg.is_err() {
-                break;
-            }
-            continue;
+        let text = match msg {
+            Ok(Message::Text(text)) => text,
+            // A proxy/ingress can reframe a text payload as binary; decode it as
+            // UTF-8 rather than silently dropping it (a dropped Result frame would
+            // otherwise strand its request until the send timeout). Non-UTF-8
+            // bytes are genuinely unusable — skip them.
+            Ok(Message::Bytes(bytes)) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => continue,
+            },
+            // A read error ends the socket.
+            Err(_) => break,
         };
         match serde_json::from_str::<WsFrame>(&text) {
             Ok(WsFrame::Result { id, result }) => {
@@ -161,7 +198,10 @@ async fn read_pump(
             }
             Err(e) => {
                 // A frame we can't parse is a protocol mismatch worth surfacing,
-                // not a silent drop.
+                // not a silent drop. Note we can't correlate it to a pending
+                // request (the id is inside the frame we failed to parse), so the
+                // request it was meant to answer is unblocked by the per-request
+                // timeout in `send_command`, not here.
                 let _ =
                     ui_tx.unbounded_send(UiMessage::Error(format!("bad frame from server: {e}")));
             }
