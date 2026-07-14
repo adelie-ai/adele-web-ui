@@ -44,6 +44,7 @@ pub enum SettingsPanel {
     Connections,
     Purposes,
     Personality,
+    Scratchpad,
 }
 
 impl SettingsPanel {
@@ -53,6 +54,7 @@ impl SettingsPanel {
         SettingsPanel::Connections,
         SettingsPanel::Purposes,
         SettingsPanel::Personality,
+        SettingsPanel::Scratchpad,
     ];
 
     fn title(self) -> &'static str {
@@ -61,6 +63,7 @@ impl SettingsPanel {
             SettingsPanel::Connections => "Connections",
             SettingsPanel::Purposes => "Purposes",
             SettingsPanel::Personality => "Personality",
+            SettingsPanel::Scratchpad => "Scratchpad",
         }
     }
 
@@ -71,6 +74,7 @@ impl SettingsPanel {
             SettingsPanel::Connections => "\u{1f50c}", // electric plug
             SettingsPanel::Purposes => "\u{1f3af}",    // direct hit / target
             SettingsPanel::Personality => "\u{1f3ad}", // performing arts / masks
+            SettingsPanel::Scratchpad => "\u{1f4dd}",  // memo / spiral notepad
         }
     }
 }
@@ -158,6 +162,7 @@ fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> 
         SettingsPanel::Personality => {
             crate::personality::personality_panel(engine, view).into_any()
         }
+        SettingsPanel::Scratchpad => crate::scratchpad::scratchpad_panel(engine, view).into_any(),
     }
 }
 

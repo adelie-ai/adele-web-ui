@@ -87,6 +87,16 @@ pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
             conversation_id,
             warning,
         },
+        // A conversation's scratchpad changed (issue #16): the reducer re-reads
+        // it (a `FetchScratchpad`) when it's the active conversation. This is the
+        // *live-push* path (another client or a mid-turn tool mutating the pad);
+        // the turn-boundary refetch already covers the common case. NOTE: the BFF
+        // only forwards per-turn events today (`crates/server/src/forward.rs`), so
+        // this arm doesn't fire end-to-end until background events are forwarded
+        // — mapping it now keeps the wire↔reducer contract complete and ready.
+        Event::ScratchpadChanged { conversation_id } => {
+            UiMessage::ScratchpadChanged { conversation_id }
+        }
         _ => return None,
     };
     Some(msg)
@@ -271,6 +281,17 @@ mod tests {
             event_to_ui_message(ev),
             Some(UiMessage::ConversationWarning { conversation_id, warning: ConversationWarning::DanglingModelSelection { .. } })
                 if conversation_id == "c1"
+        ));
+    }
+
+    #[test]
+    fn scratchpad_changed_maps_through() {
+        let ev = Event::ScratchpadChanged {
+            conversation_id: "c1".to_string(),
+        };
+        assert!(matches!(
+            event_to_ui_message(ev),
+            Some(UiMessage::ScratchpadChanged { conversation_id }) if conversation_id == "c1"
         ));
     }
 
