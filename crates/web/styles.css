@@ -1048,6 +1048,70 @@ button {
   margin-bottom: 14px;
 }
 
+/* --- Scratchpad panel ------------------------------------------------------ */
+/* Read-only view of the conversation's working notes (issue #16): notes grouped
+   by type, each row a marker (todo checkbox / bullet) + content + a key tag.
+   Rows clear 44px so they stay comfortable touch targets on a phone. */
+.scratchpad-group {
+  margin-bottom: 18px;
+}
+
+.scratchpad-group .group-header {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.scratchpad-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 0;
+  min-height: 44px;
+  border-bottom: 1px solid var(--border);
+}
+
+.scratchpad-group .scratchpad-note:last-child {
+  border-bottom: none;
+}
+
+.scratchpad-note .note-marker {
+  flex: 0 0 auto;
+  font-size: 18px;
+  line-height: 1.4;
+  color: var(--accent);
+}
+
+.scratchpad-note.done .note-marker {
+  color: var(--ok);
+}
+
+.scratchpad-note .note-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.scratchpad-note .note-content {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.scratchpad-note .note-content.struck {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.scratchpad-note .note-key {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+
 @keyframes backdrop-in {
   from {
     opacity: 0;
