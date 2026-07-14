@@ -77,18 +77,132 @@ const RELAY_ORIGIN_SESSION: &str = "__bff_relay__";
 /// conversation to route on), and `ClientToolCall` (the web client is not an MCP
 /// host) — and for the `Disconnected` control signal.
 pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
-    // Stub (failing spec): the mapping is implemented in the follow-up commit.
-    let _ = signal;
-    None
+    match signal {
+        SignalEvent::UserMessageAdded {
+            conversation_id,
+            request_id,
+            content,
+        } => Some(api::Event::UserMessageAdded {
+            conversation_id: conversation_id.clone(),
+            request_id: request_id.clone(),
+            content: content.clone(),
+        }),
+        SignalEvent::Chunk {
+            conversation_id,
+            request_id,
+            chunk,
+        } => Some(api::Event::AssistantDelta {
+            conversation_id: conversation_id.clone(),
+            request_id: request_id.clone(),
+            chunk: chunk.clone(),
+        }),
+        SignalEvent::Complete {
+            conversation_id,
+            request_id,
+            full_response,
+        } => Some(api::Event::AssistantCompleted {
+            conversation_id: conversation_id.clone(),
+            request_id: request_id.clone(),
+            full_response: full_response.clone(),
+        }),
+        SignalEvent::Error {
+            conversation_id,
+            request_id,
+            error,
+        } => Some(api::Event::AssistantError {
+            conversation_id: conversation_id.clone(),
+            request_id: request_id.clone(),
+            error: error.clone(),
+        }),
+        SignalEvent::Status {
+            conversation_id,
+            request_id,
+            message,
+        } => Some(api::Event::AssistantStatus {
+            conversation_id: conversation_id.clone(),
+            request_id: request_id.clone(),
+            message: message.clone(),
+        }),
+        SignalEvent::ContextUsage {
+            conversation_id,
+            request_id,
+            used_tokens,
+            budget_tokens,
+            compaction_active,
+        } => Some(api::Event::ContextUsage {
+            conversation_id: conversation_id.clone(),
+            request_id: request_id.clone(),
+            used_tokens: *used_tokens,
+            budget_tokens: *budget_tokens,
+            compaction_active: *compaction_active,
+        }),
+        SignalEvent::TitleChanged {
+            conversation_id,
+            title,
+        } => Some(api::Event::ConversationTitleChanged {
+            conversation_id: conversation_id.clone(),
+            title: title.clone(),
+        }),
+        SignalEvent::ConversationListChanged { conversation_id } => {
+            Some(api::Event::ConversationListChanged {
+                conversation_id: conversation_id.clone(),
+            })
+        }
+        SignalEvent::ConversationWarning {
+            conversation_id,
+            warning,
+        } => Some(api::Event::ConversationWarningEmitted {
+            conversation_id: conversation_id.clone(),
+            warning: warning.clone(),
+        }),
+        SignalEvent::ScratchpadChanged { conversation_id } => Some(api::Event::ScratchpadChanged {
+            conversation_id: conversation_id.clone(),
+        }),
+        // Not surfaced by the web UI (no process-manager / KB panel, not an MCP
+        // host), and `Disconnected` is a control signal handled by the loop.
+        SignalEvent::TaskStarted { .. }
+        | SignalEvent::TaskProgress { .. }
+        | SignalEvent::TaskLogAppended { .. }
+        | SignalEvent::TaskCompleted { .. }
+        | SignalEvent::KnowledgeChanged
+        | SignalEvent::ClientToolCall { .. }
+        | SignalEvent::Disconnected { .. } => None,
+    }
 }
 
 /// The conversation an [`api::Event`] belongs to, used to route it to the
 /// sessions viewing that conversation. Every variant [`relay_signal_to_event`]
 /// emits carries one; anything else is not relayed.
 fn event_conversation_id(event: &api::Event) -> Option<&str> {
-    // Stub (failing spec): implemented in the follow-up commit.
-    let _ = event;
-    None
+    match event {
+        api::Event::UserMessageAdded {
+            conversation_id, ..
+        }
+        | api::Event::AssistantDelta {
+            conversation_id, ..
+        }
+        | api::Event::AssistantCompleted {
+            conversation_id, ..
+        }
+        | api::Event::AssistantError {
+            conversation_id, ..
+        }
+        | api::Event::AssistantStatus {
+            conversation_id, ..
+        }
+        | api::Event::ContextUsage {
+            conversation_id, ..
+        }
+        | api::Event::ConversationTitleChanged {
+            conversation_id, ..
+        }
+        | api::Event::ConversationListChanged { conversation_id }
+        | api::Event::ConversationWarningEmitted {
+            conversation_id, ..
+        }
+        | api::Event::ScratchpadChanged { conversation_id } => Some(conversation_id),
+        _ => None,
+    }
 }
 
 /// Relay one daemon signal to the browser sessions viewing its conversation.
