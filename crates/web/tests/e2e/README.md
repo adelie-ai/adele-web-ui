@@ -85,3 +85,26 @@ check` in `src/personality.rs`.
 ```sh
 cd tests/e2e && npm run test:personality
 ```
+
+## `global_personality_panel.mjs`
+
+Browser check for the global personality panel (issue #17). Serves the built SPA
+from a **stateful** fake BFF that holds a single global `Config` and mutates its
+`personality` block on `set_config` (applying the `ConfigChanges`), returning the
+config from both `get_config` and `set_config`. It drives the real client
+round-trip in headless Chromium: open Settings → Global Personality, confirm the
+seven traits pre-fill from the daemon's config (Expressive-7 defaults, every
+trait a **concrete** level with exactly five options and **no** "Global
+(inherit)" sentinel — unlike the per-conversation panel), change
+`professionalism = Never` and `humor = Always`, **Save** (→ `SetConfig`), then
+**reload the whole page** and assert the panel re-fills those two edits from the
+stored config (`GetConfig`) while the untouched traits are unchanged — i.e. the
+global change genuinely persists. Fails on any uncaught wasm panic.
+
+The stateful fake keeps this deterministic and isolated from the shared local
+daemon. The pure trait ⇄ config + `Personality` → `ConfigChanges` mapping it
+renders is unit-tested under `just check` in `src/global_personality.rs`.
+
+```sh
+cd tests/e2e && npm run test:global-personality
+```
