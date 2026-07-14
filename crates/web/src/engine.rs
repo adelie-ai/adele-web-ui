@@ -126,6 +126,21 @@ pub struct ViewSignals {
     /// `WindowState::current_conversation_id`. Drives the switcher's active-row
     /// highlight.
     pub current_conversation_id: RwSignal<Option<String>>,
+    // --- Global personality (issue #17) --------------------------------------
+    // The daemon's global default disposition (`Config.personality`), read/written
+    // via the transport-level config API (`GetConfig` / `SetConfig`). Not owned by
+    // the shared reducer (which doesn't model `Config`); the panel loads it on
+    // demand and persists edits straight to these signals, like purposes (#11).
+    /// The daemon's global personality (the "Expressive 7" trait levels), or
+    /// `None` until first fetched via `GetConfig`. Seeds the Global Personality
+    /// panel; every trait always carries a concrete level.
+    pub global_personality: RwSignal<Option<desktop_assistant_api_model::PersonalitySettingsView>>,
+    /// Whether the global personality has been fetched at least once, so the
+    /// panel's load-once guard fires exactly once.
+    pub global_personality_loaded: RwSignal<bool>,
+    /// True while a global-personality load or save is in flight (drives the busy
+    /// hint and disables Save).
+    pub global_personality_busy: RwSignal<bool>,
     // --- Conversation scratchpad (issue #16) ---------------------------------
     /// The active conversation's scratchpad notes (Adele's ephemeral working
     /// notes; DA#184/#240). The reducer owns the fetch: it emits
@@ -168,6 +183,9 @@ impl ViewSignals {
             personality_busy: RwSignal::new(false),
             conversations: RwSignal::new(Vec::new()),
             current_conversation_id: RwSignal::new(None),
+            global_personality: RwSignal::new(None),
+            global_personality_loaded: RwSignal::new(false),
+            global_personality_busy: RwSignal::new(false),
             scratchpad: RwSignal::new(Vec::new()),
         }
     }
@@ -710,6 +728,73 @@ impl Engine {
                 Err(e) => view.toast.set(Some(format!("save personality: {e}"))),
             }
             view.personality_busy.set(false);
+        });
+    }
+
+    // --- Global personality (issue #17) --------------------------------------
+    //
+    // The daemon's global default disposition, read/written via the transport-
+    // level config API (`GetConfig` / `SetConfig`) rather than the per-
+    // conversation `SetConversationPersonality`: this is the base every
+    // conversation inherits. Both blind-forward through the BFF (no BFF change);
+    // the shared reducer doesn't model `Config`, so these write straight to the
+    // view signals like the purposes / per-conversation personality panels.
+
+    /// Load the daemon's global personality into `global_personality` via
+    /// `GetConfig`, marking `global_personality_loaded`. Called on the panel's
+    /// first open + its Refresh button. `busy` is set synchronously so the
+    /// panel's load-once guard can't kick a second fetch before this resolves.
+    pub fn refresh_global_personality(&self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        view.global_personality_busy.set(true);
+        spawn_local(async move {
+            match transport.send_command(Command::GetConfig).await {
+                Ok(CommandResult::Config(config)) => {
+                    view.global_personality.set(Some(config.personality));
+                    view.global_personality_loaded.set(true);
+                }
+                Ok(other) => view
+                    .toast
+                    .set(Some(format!("unexpected reply to GetConfig: {other:?}"))),
+                Err(e) => view
+                    .toast
+                    .set(Some(format!("load global personality: {e}"))),
+            }
+            view.global_personality_busy.set(false);
+        });
+    }
+
+    /// Persist the global personality via `SetConfig` (all seven traits as a
+    /// `ConfigChanges` — a full replace), then re-seed from the daemon's echoed
+    /// `Config` so the panel reflects the stored state (dirty → clean). A failure
+    /// raises a toast and leaves the loaded view intact.
+    pub fn save_global_personality(
+        &self,
+        personality: desktop_assistant_api_model::PersonalitySettingsView,
+    ) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        view.global_personality_busy.set(true);
+        spawn_local(async move {
+            let changes = crate::global_personality::changes_from(&personality);
+            match transport.send_command(Command::SetConfig { changes }).await {
+                Ok(CommandResult::Config(config)) => {
+                    view.global_personality.set(Some(config.personality));
+                    view.global_personality_loaded.set(true);
+                }
+                Ok(other) => view
+                    .toast
+                    .set(Some(format!("unexpected reply to SetConfig: {other:?}"))),
+                Err(e) => view
+                    .toast
+                    .set(Some(format!("save global personality: {e}"))),
+            }
+            view.global_personality_busy.set(false);
         });
     }
 
