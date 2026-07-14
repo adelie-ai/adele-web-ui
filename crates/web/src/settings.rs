@@ -41,22 +41,25 @@ pub type EngineHandle = StoredValue<Rc<RefCell<Engine>>, LocalStorage>;
 pub enum SettingsPanel {
     #[default]
     Model,
+    Connections,
 }
 
 impl SettingsPanel {
     /// Every panel, in nav order. Grows as parity panels land.
-    pub const ALL: &'static [SettingsPanel] = &[SettingsPanel::Model];
+    pub const ALL: &'static [SettingsPanel] = &[SettingsPanel::Model, SettingsPanel::Connections];
 
     fn title(self) -> &'static str {
         match self {
             SettingsPanel::Model => "Model",
+            SettingsPanel::Connections => "Connections",
         }
     }
 
     /// A leading glyph for the nav tab (decorative; the title carries meaning).
     fn icon(self) -> &'static str {
         match self {
-            SettingsPanel::Model => "\u{1f9e0}", // brain
+            SettingsPanel::Model => "\u{1f9e0}",       // brain
+            SettingsPanel::Connections => "\u{1f50c}", // electric plug
         }
     }
 }
@@ -137,6 +140,9 @@ pub fn SettingsSheet(
 fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> AnyView {
     match panel {
         SettingsPanel::Model => model_panel(engine, view).into_any(),
+        SettingsPanel::Connections => {
+            crate::connections::connections_panel(engine, view).into_any()
+        }
     }
 }
 

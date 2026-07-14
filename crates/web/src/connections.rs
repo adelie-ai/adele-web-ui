@@ -18,7 +18,7 @@
 //! `Debug` by [`Secret`]; it is never read back.
 
 use desktop_assistant_api_model::{
-    Command, ConnectionAvailability, ConnectionConfigView, ConnectionView,
+    Command, ConnectionAvailability, ConnectionConfigView, ConnectionView, Secret,
 };
 
 // ===========================================================================
@@ -112,9 +112,46 @@ impl PreservedFields {
     /// Extract the unsurfaced fields from an echoed config (`None` config — the
     /// create path or an older daemon — yields all-`None`).
     pub fn from_config(config: Option<&ConnectionConfigView>) -> Self {
-        // Spec stub — real logic lands in the implementation commit.
-        let _ = config;
-        todo!("PreservedFields::from_config")
+        match config {
+            Some(
+                ConnectionConfigView::Anthropic {
+                    connect_timeout_secs,
+                    stream_timeout_secs,
+                    max_context_tokens,
+                    ..
+                }
+                | ConnectionConfigView::OpenAi {
+                    connect_timeout_secs,
+                    stream_timeout_secs,
+                    max_context_tokens,
+                    ..
+                }
+                | ConnectionConfigView::Bedrock {
+                    connect_timeout_secs,
+                    stream_timeout_secs,
+                    max_context_tokens,
+                    ..
+                },
+            ) => Self {
+                connect_timeout_secs: *connect_timeout_secs,
+                stream_timeout_secs: *stream_timeout_secs,
+                max_context_tokens: *max_context_tokens,
+                keep_warm: None,
+            },
+            Some(ConnectionConfigView::Ollama {
+                connect_timeout_secs,
+                stream_timeout_secs,
+                max_context_tokens,
+                keep_warm,
+                ..
+            }) => Self {
+                connect_timeout_secs: *connect_timeout_secs,
+                stream_timeout_secs: *stream_timeout_secs,
+                max_context_tokens: *max_context_tokens,
+                keep_warm: *keep_warm,
+            },
+            None => Self::default(),
+        }
     }
 }
 
@@ -162,31 +199,151 @@ impl ConnForm {
     /// fields into `preserved`. The credential inputs stay blank — a stored
     /// secret is never echoed or round-tripped.
     pub fn from_view(view: &ConnectionView) -> Self {
-        // Spec stub — real logic lands in the implementation commit.
-        let _ = view;
-        todo!("ConnForm::from_view")
+        // Fall back to Anthropic on an unrecognized connector_type so the form
+        // is still usable; a mismatched/absent config just leaves fields blank.
+        let kind =
+            ConnectorKind::from_tag(&view.connector_type).unwrap_or(ConnectorKind::Anthropic);
+        let config = view.config.as_ref();
+        // Only pre-fill from a config whose variant matches `kind`, so a
+        // mismatch never leaks a value across connector types.
+        let matched = config.filter(|c| c.connector_type() == kind.tag());
+
+        let (base_url, api_key_env, aws_profile, region) = match matched {
+            Some(ConnectionConfigView::Anthropic {
+                base_url,
+                api_key_env,
+                ..
+            })
+            | Some(ConnectionConfigView::OpenAi {
+                base_url,
+                api_key_env,
+                ..
+            }) => (
+                base_url.clone().unwrap_or_default(),
+                api_key_env.clone().unwrap_or_default(),
+                String::new(),
+                String::new(),
+            ),
+            Some(ConnectionConfigView::Bedrock {
+                aws_profile,
+                region,
+                base_url,
+                ..
+            }) => (
+                base_url.clone().unwrap_or_default(),
+                String::new(),
+                aws_profile.clone().unwrap_or_default(),
+                region.clone().unwrap_or_default(),
+            ),
+            Some(ConnectionConfigView::Ollama { base_url, .. }) => (
+                base_url.clone().unwrap_or_default(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
+
+        Self {
+            editing_id: Some(view.id.clone()),
+            kind,
+            id: view.id.clone(),
+            base_url,
+            api_key_env,
+            aws_profile,
+            region,
+            secret: String::new(),
+            clear_secret: false,
+            preserved: PreservedFields::from_config(matched),
+        }
     }
 
     /// Validate + assemble the form into the command inputs: the target id
     /// (typed for create, immutable for edit), the per-connector config, and
     /// the optional credential action. `Err` carries a human-readable reason.
     pub fn build(&self) -> Result<BuiltConnection, String> {
-        // Spec stub — real logic lands in the implementation commit. Reads every
-        // field so the flat DTO carries no dead weight before the impl lands.
-        let _ = (
-            &self.editing_id,
-            self.kind,
-            &self.id,
-            &self.base_url,
-            &self.api_key_env,
-            &self.aws_profile,
-            &self.region,
-            &self.secret,
-            self.clear_secret,
-            self.preserved,
-        );
-        todo!("ConnForm::build")
+        let id = match &self.editing_id {
+            // Edit: the id is immutable and already validated by the daemon.
+            Some(existing) => existing.clone(),
+            // Create: validate the freshly-typed slug.
+            None => {
+                let typed = self.id.trim().to_string();
+                validate_slug(&typed)?;
+                typed
+            }
+        };
+        let credential = if self.kind.accepts_credential() {
+            credential_action(&self.secret, self.clear_secret)
+        } else {
+            None
+        };
+        Ok(BuiltConnection {
+            editing_id: self.editing_id.clone(),
+            id,
+            config: self.config(),
+            credential,
+        })
     }
+
+    /// Assemble the per-connector [`ConnectionConfigView`] from the surfaced
+    /// inputs plus the round-tripped [`PreservedFields`].
+    fn config(&self) -> ConnectionConfigView {
+        let opt = |s: &str| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        };
+        let p = self.preserved;
+        match self.kind {
+            ConnectorKind::Anthropic => ConnectionConfigView::Anthropic {
+                base_url: opt(&self.base_url),
+                api_key_env: opt(&self.api_key_env),
+                connect_timeout_secs: p.connect_timeout_secs,
+                stream_timeout_secs: p.stream_timeout_secs,
+                max_context_tokens: p.max_context_tokens,
+            },
+            ConnectorKind::OpenAi => ConnectionConfigView::OpenAi {
+                base_url: opt(&self.base_url),
+                api_key_env: opt(&self.api_key_env),
+                connect_timeout_secs: p.connect_timeout_secs,
+                stream_timeout_secs: p.stream_timeout_secs,
+                max_context_tokens: p.max_context_tokens,
+            },
+            ConnectorKind::Bedrock => ConnectionConfigView::Bedrock {
+                aws_profile: opt(&self.aws_profile),
+                region: opt(&self.region),
+                base_url: opt(&self.base_url),
+                connect_timeout_secs: p.connect_timeout_secs,
+                stream_timeout_secs: p.stream_timeout_secs,
+                max_context_tokens: p.max_context_tokens,
+            },
+            ConnectorKind::Ollama => ConnectionConfigView::Ollama {
+                base_url: opt(&self.base_url),
+                connect_timeout_secs: p.connect_timeout_secs,
+                stream_timeout_secs: p.stream_timeout_secs,
+                keep_warm: p.keep_warm,
+                max_context_tokens: p.max_context_tokens,
+            },
+        }
+    }
+}
+
+/// Validate a connection id slug: non-empty, and only letters, digits, `-`, `_`
+/// (mirrors the gtk dialog + the daemon's slug contract).
+fn validate_slug(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("Connection id is required.".to_string());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Id may only contain letters, digits, '-', and '_'.".to_string());
+    }
+    Ok(())
 }
 
 /// The assembled inputs for a create/update (+ optional credential) round-trip.
@@ -209,9 +366,15 @@ pub struct BuiltConnection {
 ///   hygiene — no credential format has significant surrounding whitespace);
 /// - blank text, no clear → `None`: we never implicitly wipe a stored secret.
 pub fn credential_action(raw: &str, clear_requested: bool) -> Option<CredentialAction> {
-    // Spec stub — real logic lands in the implementation commit.
-    let _ = (raw, clear_requested);
-    todo!("credential_action")
+    if clear_requested {
+        return Some(CredentialAction::Clear);
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(CredentialAction::Set(trimmed.to_string()))
+    }
 }
 
 /// Build the [`Command::SetConnectionSecret`] for a credential action. A
@@ -219,16 +382,22 @@ pub fn credential_action(raw: &str, clear_requested: bool) -> Option<CredentialA
 /// "clear" signal); the value is wrapped in [`Secret`] so it can't leak via
 /// `Debug`.
 pub fn secret_command(id: String, action: CredentialAction) -> Command {
-    // Spec stub — real logic lands in the implementation commit.
-    let _ = (&id, &action);
-    todo!("secret_command")
+    let credential = match action {
+        CredentialAction::Set(value) => value,
+        CredentialAction::Clear => String::new(),
+    };
+    Command::SetConnectionSecret {
+        id,
+        credential: Secret(credential),
+    }
 }
 
 /// A one-line availability summary for a connection card.
 pub fn availability_label(availability: &ConnectionAvailability) -> String {
-    // Spec stub — real logic lands in the implementation commit.
-    let _ = availability;
-    todo!("availability_label")
+    match availability {
+        ConnectionAvailability::Ok => "Available".to_string(),
+        ConnectionAvailability::Unavailable { reason } => format!("Unavailable: {reason}"),
+    }
 }
 
 /// Whether a connection is currently healthy (drives the status dot colour).
@@ -238,9 +407,534 @@ pub fn availability_is_ok(availability: &ConnectionAvailability) -> bool {
 
 /// The credential-state label for a card / form (never the secret itself).
 pub fn credentials_label(has_credentials: bool) -> &'static str {
-    // Spec stub — real logic lands in the implementation commit.
-    let _ = has_credentials;
-    todo!("credentials_label")
+    if has_credentials {
+        "Credential stored"
+    } else {
+        "No credential"
+    }
+}
+
+// ===========================================================================
+// Leptos view (wasm only)
+// ===========================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub use view::connections_panel;
+
+#[cfg(target_arch = "wasm32")]
+mod view {
+    use std::rc::Rc;
+
+    use leptos::prelude::*;
+
+    use super::{
+        ConnForm, ConnectorKind, PreservedFields, availability_is_ok, availability_label,
+        credentials_label,
+    };
+    use crate::engine::{ActionDone, ViewSignals};
+    use crate::settings::EngineHandle;
+    use desktop_assistant_api_model::ConnectionView;
+
+    /// The reactive edit/create form state, one signal per field. The flat
+    /// [`ConnForm`] DTO is splatted in on open ([`Self::load`]) and read back on
+    /// submit ([`Self::snapshot`]), keeping the validation/mapping in the pure,
+    /// tested [`ConnForm`] rather than the view.
+    #[derive(Clone, Copy)]
+    struct FormState {
+        /// `true` ⇒ the form (not the list) is shown.
+        open: RwSignal<bool>,
+        editing_id: RwSignal<Option<String>>,
+        kind: RwSignal<ConnectorKind>,
+        id: RwSignal<String>,
+        base_url: RwSignal<String>,
+        api_key_env: RwSignal<String>,
+        aws_profile: RwSignal<String>,
+        region: RwSignal<String>,
+        secret: RwSignal<String>,
+        clear_secret: RwSignal<bool>,
+        preserved: RwSignal<PreservedFields>,
+        /// Whether the connection being edited already has a stored credential
+        /// (display-only — the secret itself is never fetched).
+        has_credentials: RwSignal<bool>,
+        error: RwSignal<Option<String>>,
+    }
+
+    impl FormState {
+        fn new() -> Self {
+            Self {
+                open: RwSignal::new(false),
+                editing_id: RwSignal::new(None),
+                kind: RwSignal::new(ConnectorKind::Anthropic),
+                id: RwSignal::new(String::new()),
+                base_url: RwSignal::new(String::new()),
+                api_key_env: RwSignal::new(String::new()),
+                aws_profile: RwSignal::new(String::new()),
+                region: RwSignal::new(String::new()),
+                secret: RwSignal::new(String::new()),
+                clear_secret: RwSignal::new(false),
+                preserved: RwSignal::new(PreservedFields::default()),
+                has_credentials: RwSignal::new(false),
+                error: RwSignal::new(None),
+            }
+        }
+
+        /// Splat a form + its credential state into the signals and open it.
+        fn load(&self, f: ConnForm, has_credentials: bool) {
+            self.editing_id.set(f.editing_id);
+            self.kind.set(f.kind);
+            self.id.set(f.id);
+            self.base_url.set(f.base_url);
+            self.api_key_env.set(f.api_key_env);
+            self.aws_profile.set(f.aws_profile);
+            self.region.set(f.region);
+            self.secret.set(f.secret);
+            self.clear_secret.set(f.clear_secret);
+            self.preserved.set(f.preserved);
+            self.has_credentials.set(has_credentials);
+            self.error.set(None);
+            self.open.set(true);
+        }
+
+        fn open_create(&self) {
+            self.load(ConnForm::blank(ConnectorKind::Anthropic), false);
+        }
+
+        fn close(&self) {
+            self.open.set(false);
+            self.error.set(None);
+        }
+
+        /// Read the signals back into a pure [`ConnForm`] for validation/build.
+        fn snapshot(&self) -> ConnForm {
+            ConnForm {
+                editing_id: self.editing_id.get_untracked(),
+                kind: self.kind.get_untracked(),
+                id: self.id.get_untracked(),
+                base_url: self.base_url.get_untracked(),
+                api_key_env: self.api_key_env.get_untracked(),
+                aws_profile: self.aws_profile.get_untracked(),
+                region: self.region.get_untracked(),
+                secret: self.secret.get_untracked(),
+                clear_secret: self.clear_secret.get_untracked(),
+                preserved: self.preserved.get_untracked(),
+            }
+        }
+    }
+
+    /// Panel-local delete-confirmation state. `force_offered` flips on once the
+    /// daemon refuses a non-force delete (a referenced connection), revealing the
+    /// force retry.
+    #[derive(Clone)]
+    struct Confirm {
+        id: String,
+        force_offered: bool,
+        error: Option<String>,
+    }
+
+    /// The Connections settings panel: a live list of connections with add /
+    /// configure / delete + credential entry, or the edit form when one is open.
+    pub fn connections_panel(engine: EngineHandle, view: ViewSignals) -> impl IntoView {
+        let form = FormState::new();
+        let confirm = RwSignal::new(None::<Confirm>);
+
+        // Load the list once the panel mounts (re-created each time the tab is
+        // opened, so this refreshes on every open). Deferred via an effect so the
+        // signal writes don't happen during render.
+        Effect::new(move |_| {
+            engine.with_value(|e| e.borrow().refresh_connections());
+        });
+
+        view! {
+            <section class="panel connections-panel">
+                {move || {
+                    if form.open.get() {
+                        connection_form(engine, view, form).into_any()
+                    } else {
+                        connection_list(engine, view, form, confirm).into_any()
+                    }
+                }}
+            </section>
+        }
+    }
+
+    /// The list view: intro, error banner, an optional delete-confirm, the cards
+    /// (or loading/empty state), and the "Add connection" button.
+    fn connection_list(
+        engine: EngineHandle,
+        view: ViewSignals,
+        form: FormState,
+        confirm: RwSignal<Option<Confirm>>,
+    ) -> impl IntoView {
+        view! {
+            <div class="conn-list">
+                <p class="panel-note muted">
+                    "LLM provider connections. Add, edit, or remove connections and set their credentials."
+                </p>
+
+                <Show when=move || view.connections_error.get().is_some()>
+                    <p class="conn-error" role="alert">
+                        {move || view.connections_error.get().unwrap_or_default()}
+                    </p>
+                </Show>
+
+                {move || confirm.get().map(|c| confirm_block(engine, confirm, c))}
+
+                {move || {
+                    if view.connections_busy.get() && !view.connections_loaded.get() {
+                        view! { <p class="empty muted">"Loading connections…"</p> }.into_any()
+                    } else {
+                        let conns = view.connections.get();
+                        if conns.is_empty() {
+                            view! {
+                                <p class="empty muted">"No connections yet. Add one below."</p>
+                            }
+                                .into_any()
+                        } else {
+                            conns
+                                .into_iter()
+                                .map(|c| card(form, confirm, c))
+                                .collect_view()
+                                .into_any()
+                        }
+                    }
+                }}
+
+                <button
+                    class="conn-btn primary conn-add"
+                    on:click=move |_| form.open_create()
+                >
+                    "+ Add connection"
+                </button>
+            </div>
+        }
+    }
+
+    /// One connection card: status dot, id + type, availability + credential
+    /// state, and Configure / Delete actions.
+    fn card(
+        form: FormState,
+        confirm: RwSignal<Option<Confirm>>,
+        c: ConnectionView,
+    ) -> impl IntoView {
+        let is_ok = availability_is_ok(&c.availability);
+        let subtitle = format!(
+            "{} · {}",
+            availability_label(&c.availability),
+            credentials_label(c.has_credentials)
+        );
+        let title = format!("{}  ({})", c.id, c.connector_type);
+        let for_edit = c.clone();
+        let delete_id = c.id.clone();
+
+        view! {
+            <div class="conn-card">
+                <span class=if is_ok { "conn-dot ok" } else { "conn-dot bad" }></span>
+                <div class="conn-card-main">
+                    <span class="conn-card-title">{title}</span>
+                    <span class="conn-card-sub muted">{subtitle}</span>
+                </div>
+                <div class="conn-actions">
+                    <button
+                        class="conn-btn"
+                        on:click=move |_| {
+                            form.load(ConnForm::from_view(&for_edit), for_edit.has_credentials);
+                        }
+                    >
+                        "Configure"
+                    </button>
+                    <button
+                        class="conn-btn danger"
+                        on:click=move |_| {
+                            confirm
+                                .set(
+                                    Some(Confirm {
+                                        id: delete_id.clone(),
+                                        force_offered: false,
+                                        error: None,
+                                    }),
+                                )
+                        }
+                    >
+                        "Delete"
+                    </button>
+                </div>
+            </div>
+        }
+    }
+
+    /// The delete-confirmation block. Offers a force retry once a plain delete is
+    /// refused because a purpose still references the connection.
+    fn confirm_block(
+        engine: EngineHandle,
+        confirm: RwSignal<Option<Confirm>>,
+        c: Confirm,
+    ) -> impl IntoView {
+        // `Copy` (captures are all `Copy`), so both Delete and Force buttons can
+        // reuse it. Re-reads the live confirm state so the retry keeps the id.
+        let start_delete = move |force: bool| {
+            let Some(cur) = confirm.get_untracked() else {
+                return;
+            };
+            let id = cur.id.clone();
+            let id_done = id.clone();
+            let was_offered = cur.force_offered;
+            let done: ActionDone = Rc::new(move |res: Result<(), String>| match res {
+                Ok(()) => confirm.set(None),
+                Err(e) => {
+                    // Reveal the force retry when the daemon refuses because a
+                    // purpose references the connection.
+                    let offer = was_offered || (!force && e.to_lowercase().contains("purpose"));
+                    confirm.set(Some(Confirm {
+                        id: id_done.clone(),
+                        force_offered: offer,
+                        error: Some(e),
+                    }));
+                }
+            });
+            engine.with_value(|e| e.borrow().delete_connection(id, force, done));
+        };
+
+        let force_offered = c.force_offered;
+        let error = c.error.clone();
+        let heading = format!("Delete \u{201c}{}\u{201d}?", c.id);
+
+        view! {
+            <div class="conn-confirm" role="alertdialog">
+                <p class="conn-confirm-q">{heading}</p>
+                {error.map(|e| view! { <p class="conn-error">{e}</p> })}
+                <Show when=move || force_offered>
+                    <p class="conn-note muted">
+                        "Purposes using this connection will fall back to the interactive purpose."
+                    </p>
+                </Show>
+                <div class="conn-form-actions">
+                    <button class="conn-btn" on:click=move |_| confirm.set(None)>
+                        "Cancel"
+                    </button>
+                    {force_offered
+                        .then(|| {
+                            view! {
+                                <button
+                                    class="conn-btn danger"
+                                    on:click=move |_| start_delete(true)
+                                >
+                                    "Force delete"
+                                </button>
+                            }
+                        })}
+                    <button class="conn-btn danger" on:click=move |_| start_delete(false)>
+                        "Delete"
+                    </button>
+                </div>
+            </div>
+        }
+    }
+
+    /// The create/edit form.
+    fn connection_form(engine: EngineHandle, view: ViewSignals, form: FormState) -> impl IntoView {
+        let on_save = move |_| match form.snapshot().build() {
+            Ok(built) => {
+                form.error.set(None);
+                let done: ActionDone = Rc::new(move |res: Result<(), String>| match res {
+                    Ok(()) => form.close(),
+                    Err(e) => form.error.set(Some(e)),
+                });
+                engine.with_value(|e| {
+                    e.borrow().save_connection(
+                        built.editing_id,
+                        built.id,
+                        built.config,
+                        built.credential,
+                        done,
+                    )
+                });
+            }
+            Err(e) => form.error.set(Some(e)),
+        };
+
+        view! {
+            <div class="conn-form">
+                <div class="conn-form-head">
+                    <button class="conn-btn" on:click=move |_| form.close()>
+                        "\u{2039} Back"
+                    </button>
+                    <h3 class="conn-form-title">
+                        {move || match form.editing_id.get() {
+                            Some(id) => format!("Edit {id}"),
+                            None => "New connection".to_string(),
+                        }}
+                    </h3>
+                </div>
+
+                // Type: chips on create, a locked label on edit.
+                <div class="field">
+                    <span class="field-label">"Type"</span>
+                    {move || {
+                        if form.editing_id.get().is_some() {
+                            view! {
+                                <p class="conn-locked">
+                                    {form.kind.get().label()} " · locked on edit"
+                                </p>
+                            }
+                                .into_any()
+                        } else {
+                            view! {
+                                <div class="segmented" role="group" aria-label="Connector type">
+                                    {ConnectorKind::ALL
+                                        .iter()
+                                        .copied()
+                                        .map(|k| {
+                                            let active = move || form.kind.get() == k;
+                                            view! {
+                                                <button
+                                                    class="segment"
+                                                    class:active=active
+                                                    aria-pressed=move || {
+                                                        if active() { "true" } else { "false" }
+                                                    }
+                                                    on:click=move |_| form.kind.set(k)
+                                                >
+                                                    {k.label()}
+                                                </button>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </div>
+                            }
+                                .into_any()
+                        }
+                    }}
+                </div>
+
+                // Id: editable slug on create, locked on edit.
+                {move || {
+                    let editing = form.editing_id.get().is_some();
+                    view! {
+                        <div class="field">
+                            <label class="field-label">
+                                {if editing { "Connection id (locked)" } else { "Connection id (slug)" }}
+                            </label>
+                            <input
+                                class="conn-input"
+                                type="text"
+                                autocomplete="off"
+                                placeholder="e.g. work, aws-prod, local"
+                                disabled=editing
+                                prop:value=move || form.id.get()
+                                on:input=move |ev| form.id.set(event_target_value(&ev))
+                            />
+                        </div>
+                    }
+                }}
+
+                // Per-connector config fields.
+                {move || kind_fields(form)}
+
+                // Credential entry (hidden for connectors that take none).
+                {move || credential_section(form)}
+
+                <Show when=move || form.error.get().is_some()>
+                    <p class="conn-error" role="alert">
+                        {move || form.error.get().unwrap_or_default()}
+                    </p>
+                </Show>
+
+                <div class="conn-form-actions">
+                    <button class="conn-btn" on:click=move |_| form.close()>
+                        "Cancel"
+                    </button>
+                    <button
+                        class="conn-btn primary"
+                        disabled=move || view.connections_busy.get()
+                        on:click=on_save
+                    >
+                        "Save"
+                    </button>
+                </div>
+            </div>
+        }
+    }
+
+    /// The per-connector config inputs, keyed on the selected kind.
+    fn kind_fields(form: FormState) -> AnyView {
+        match form.kind.get() {
+            ConnectorKind::Anthropic | ConnectorKind::OpenAi => view! {
+                {text_field("Base URL (optional)", form.base_url, "https://api.example.com/v1")}
+                {text_field("API key env var (optional)", form.api_key_env, "e.g. OPENAI_API_KEY")}
+            }
+            .into_any(),
+            ConnectorKind::Bedrock => view! {
+                {text_field("AWS profile (optional)", form.aws_profile, "default")}
+                {text_field("Region", form.region, "us-west-2")}
+                {text_field("Base URL (optional)", form.base_url, "")}
+            }
+            .into_any(),
+            ConnectorKind::Ollama => {
+                text_field("Base URL", form.base_url, "http://localhost:11434").into_any()
+            }
+        }
+    }
+
+    /// A labelled single-line text input bound to `value`.
+    fn text_field(
+        label: &'static str,
+        value: RwSignal<String>,
+        placeholder: &'static str,
+    ) -> impl IntoView {
+        view! {
+            <div class="field">
+                <label class="field-label">{label}</label>
+                <input
+                    class="conn-input"
+                    type="text"
+                    autocomplete="off"
+                    placeholder=placeholder
+                    prop:value=move || value.get()
+                    on:input=move |ev| value.set(event_target_value(&ev))
+                />
+            </div>
+        }
+    }
+
+    /// The write-only credential entry: current state, a password input, an
+    /// explicit "clear" toggle (only when one is stored), and the posture note.
+    /// Renders nothing for connectors that take no credential (Ollama).
+    fn credential_section(form: FormState) -> AnyView {
+        let kind = form.kind.get();
+        if !kind.accepts_credential() {
+            return ().into_any();
+        }
+        view! {
+            <div class="field conn-cred">
+                <span class="field-label">"Credential"</span>
+                <p class="conn-note muted">
+                    {move || credentials_label(form.has_credentials.get())}
+                </p>
+                <input
+                    class="conn-input"
+                    type="password"
+                    autocomplete="off"
+                    placeholder=kind.credential_placeholder()
+                    prop:value=move || form.secret.get()
+                    on:input=move |ev| form.secret.set(event_target_value(&ev))
+                />
+                <Show when=move || form.has_credentials.get()>
+                    <label class="conn-check">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || form.clear_secret.get()
+                            on:change=move |ev| form.clear_secret.set(event_target_checked(&ev))
+                        />
+                        "Clear the stored credential"
+                    </label>
+                </Show>
+                <p class="conn-note muted">
+                    "Sent write-only to the daemon over your private tailnet; never shown here. Leave blank to keep the current credential."
+                </p>
+            </div>
+        }
+        .into_any()
+    }
 }
 
 #[cfg(test)]
