@@ -1,0 +1,49 @@
+# Optional: expose the web UI on a real hostname via the cluster's ingress
+# controller, instead of `kubectl port-forward`. This mirrors the common pattern
+# of a cert-manager Certificate (populating a TLS Secret from a ClusterIssuer)
+# plus an Ingress that references it.
+#
+# PLACEHOLDERS — never commit your real hostname, cluster-issuer, or node IPs:
+#   adele-web-ui.example.com   -> your internal/tailnet host
+#   letsencrypt-example        -> your cert-manager ClusterIssuer
+# Render the real values in at apply time (see deploy/k8s/README.md). Keep this
+# on a private/VPN-only ingress — the web UI is NOT for the public internet.
+#
+# NOTE: the browser Origin for this host (https://<host>) must be in the
+# Deployment's ADELE_WEB_UI_ALLOWED_ORIGINS (see 50-web-ui.yaml). The ingress
+# controller must forward WebSocket upgrades to /ws (Traefik does by default).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: adele-web-ui-cert
+  namespace: adele-test
+spec:
+  secretName: adele-web-ui-tls
+  dnsNames:
+    - adele-web-ui.example.com
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-example
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adele-web-ui
+  namespace: adele-test
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: adele-web-ui.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adele-web-ui
+                port:
+                  number: 9379
+  tls:
+    - hosts:
+        - adele-web-ui.example.com
+      secretName: adele-web-ui-tls

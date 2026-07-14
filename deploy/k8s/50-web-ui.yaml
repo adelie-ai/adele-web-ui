@@ -37,12 +37,14 @@ spec:
               value: "0.0.0.0"
             - name: ADELE_WEB_UI_PORT
               value: "9379"
-            # Browser Origin allowlist. For `kubectl port-forward svc/adele-web-ui
-            # 9379:9379` the SPA is loaded same-origin, so the WS/`/login` Origin
-            # is one of these. Add your Tailscale MagicDNS origin (e.g.
-            # http://<host>.<tailnet>.ts.net:9379) to reach it over the tailnet.
+            # Browser Origin allowlist. `http://localhost:9379` / `127.0.0.1`
+            # cover `kubectl port-forward svc/adele-web-ui 9379:9379` (same-origin
+            # SPA). `https://adele-web-ui.example.com` is a PLACEHOLDER for the
+            # ingress host (60-web-ui-ingress.yaml) — replace with your real host
+            # at apply time; add a Tailscale MagicDNS origin here too if you reach
+            # it over the tailnet without the ingress.
             - name: ADELE_WEB_UI_ALLOWED_ORIGINS
-              value: "http://localhost:9379,http://127.0.0.1:9379"
+              value: "http://localhost:9379,http://127.0.0.1:9379,https://adele-web-ui.example.com"
             # Browser front-door login (POST /login, HTTP Basic). Reuses the same
             # shared password Secret as the daemon for a single credential.
             - name: ADELE_WEB_UI_LOGIN_USERNAME

@@ -58,6 +58,34 @@ kubectl apply -f /tmp/50-web-ui.rendered.yaml
 kubectl -n adele-test rollout status deploy/adele-web-ui
 ```
 
+## Expose on a hostname (optional ingress)
+
+Instead of `port-forward`, expose the UI via the cluster's ingress controller.
+`60-web-ui-ingress.yaml` is a cert-manager `Certificate` + `Ingress`, fully
+**placeholdered** — never commit your real host / cluster-issuer / node IPs.
+Render them in at apply time and add the matching `https://<host>` browser
+origin to the Deployment's allowlist (also placeholdered in `50-web-ui.yaml`):
+
+```sh
+HOST=your-host.example.internal        # <-- your private/tailnet host (do not commit)
+ISSUER=your-clusterissuer              # <-- your cert-manager ClusterIssuer (do not commit)
+
+sed -e "s#adele-web-ui.example.com#$HOST#g" \
+    -e "s#letsencrypt-example#$ISSUER#g" \
+  deploy/k8s/60-web-ui-ingress.yaml > /tmp/60-web-ui-ingress.rendered.yaml
+kubectl apply -f /tmp/60-web-ui-ingress.rendered.yaml
+
+# Re-render the Deployment so the allowlist carries the real origin, then apply.
+sed -e "s#registry.example.com:5000/adele/adele-web-ui:REPLACE_ME#$IMG#" \
+    -e "s#adele-web-ui.example.com#$HOST#g" \
+  deploy/k8s/50-web-ui.yaml > /tmp/50-web-ui.rendered.yaml
+kubectl apply -f /tmp/50-web-ui.rendered.yaml
+```
+
+Keep this on a private/VPN-only ingress; the web UI is not for the public
+internet. The ingress controller must forward WebSocket upgrades to `/ws`
+(Traefik does by default). The SPA derives `wss://` automatically under TLS.
+
 ## Smoke test
 
 ```sh
