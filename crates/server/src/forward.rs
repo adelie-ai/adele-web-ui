@@ -10,16 +10,25 @@
 use std::sync::Arc;
 
 use desktop_assistant_api_model as api;
+use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_application::{ApiError, ApiResult, AssistantApiHandler, EventSink};
 use desktop_assistant_client_common::{AssistantCommands, Connector, SignalEvent};
 
 pub struct ForwardingHandler {
     connector: Arc<Connector>,
+    /// Per-connection browser-session registry (#33). Returned from
+    /// [`AssistantApiHandler::conversation_subscriptions`] so the embedded
+    /// `ws-interface` dispatcher registers each browser connection's outbound
+    /// sink here at connect and records what it's viewing from the SPA's
+    /// `SubscribeConversations`. The background event-relay
+    /// ([`crate::relay::run_relay`]) fans the daemon's cross-client / background
+    /// events to those sessions through it — the same registry, shared.
+    subs: Arc<ConversationSubscriptions>,
 }
 
 impl ForwardingHandler {
-    pub fn new(connector: Arc<Connector>) -> Self {
-        Self { connector }
+    pub fn new(connector: Arc<Connector>, subs: Arc<ConversationSubscriptions>) -> Self {
+        Self { connector, subs }
     }
 
     fn commands(&self) -> ApiResult<&(dyn AssistantCommands + '_)> {
@@ -115,6 +124,17 @@ impl AssistantApiHandler for ForwardingHandler {
             }
         }
         Ok(())
+    }
+
+    /// Hand the dispatcher the shared browser-session registry (#33). This is the
+    /// `ws-interface`'s sanctioned seam for server-initiated pushes: the
+    /// dispatcher registers each browser connection's outbound sink here at
+    /// connect and applies its `SubscribeConversations`. The background relay
+    /// ([`crate::relay::run_relay`]) then fans the daemon's cross-client /
+    /// background events to those sessions through this same registry. Returning
+    /// `None` (the old default) is what left live sync / scratchpad undelivered.
+    fn conversation_subscriptions(&self) -> Option<Arc<ConversationSubscriptions>> {
+        Some(Arc::clone(&self.subs))
     }
 }
 
