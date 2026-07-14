@@ -22,6 +22,34 @@ The companion unit tests in `src/reply.rs` (which *do* run under `just check`)
 cover the per-request timeout — the general backstop for any reply that is never
 delivered (stalled handler, lost/unparseable frame).
 
+## `conversation_switcher.mjs`
+
+Drives the conversation switcher (issue #12) in a real headless browser against a
+**stateful** mock BFF that keeps an in-memory conversation list. It asserts, in
+the DOM, that: the drawer lists the conversations with the open one marked;
+tapping another row switches the chat (header + active marker update); "+ New
+conversation" creates one and opens it; and deleting the one it created (via the
+inline confirm) removes its row and re-homes the view to a remaining
+conversation. Also fails on any uncaught wasm panic.
+
+A stateful mock keeps this deterministic and isolated from the shared local
+daemon (concurrent agents build against it) — the test never touches data it
+didn't create. The pure row helpers (`src/sidebar.rs`) run under `just check`.
+
+## `context_usage_indicator.mjs`
+
+Coverage for the context-window usage indicator (issue #14). The fake BFF acks a
+sent message and streams the turn's events back — including the per-turn
+`context_usage` event (DA#341) — as correctly-nested `WsFrame::Event` frames.
+The test asserts the indicator is **hidden** before any turn, then **appears**
+after turn one with the shared `used / budget (pct%)` readout and the green
+colour bucket, then **updates in place** to amber after a heavier second turn
+crosses the 0.85 compaction line — proving the whole wire→reducer→engine→DOM
+path in a real browser. The pure `used/budget/percent` formatting, colour
+bucketing, and the web-specific `aria_label` / `bar_percent` are unit-tested
+under `just check` (`client-ui-common`'s `context_usage` + `src/context.rs`);
+this covers only the browser-render + reactive-update layer they can't reach.
+
 ## Running
 
 ```sh

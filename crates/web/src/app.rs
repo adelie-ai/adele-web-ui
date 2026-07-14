@@ -20,7 +20,7 @@ use client_ui_common::UiMessage;
 
 use crate::engine::{Engine, ViewSignals};
 use crate::settings::{self, SettingsPanel, SettingsSheet};
-use crate::{auth, transport};
+use crate::{auth, context, transport};
 
 /// Root component. Shows the login screen until a token is present, then the
 /// chat screen; signing out clears the token and returns here.
@@ -184,12 +184,28 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
     // tasks and top-level event handlers, which don't require `Send`).
     let engine_handle: settings::EngineHandle = StoredValue::new_local(engine.clone());
 
+    // Conversation switcher drawer (issue #12): `false` = closed. Opening
+    // refreshes the list (load-on-open) so it reflects conversations added or
+    // removed elsewhere; live push is out of scope (#15).
+    let sidebar_open = RwSignal::new(false);
+    let open_sidebar = move |_| {
+        engine_handle.with_value(|e| e.borrow().refresh_conversation_list());
+        sidebar_open.set(true);
+    };
+
     // The toast is a transient view concern; dismissing it just clears the signal.
     let dismiss_toast = move |_| view.toast.set(None);
 
     view! {
         <main class="app-shell chat">
             <header class="chat-header">
+                <button
+                    class="icon-btn"
+                    aria-label="Open conversations"
+                    on:click=open_sidebar
+                >
+                    "\u{2630}"
+                </button>
                 <span class="title">
                     {move || {
                         let t = view.title.get();
@@ -244,6 +260,10 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                 </Show>
             </section>
 
+            // Context-window usage indicator (issue #14): unobtrusive, above the
+            // composer; hidden until the active conversation reports a reading.
+            {context::context_usage_bar(view)}
+
             <form class="composer" on:submit=on_send>
                 <input
                     type="text"
@@ -263,6 +283,8 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                 open=settings_open
                 session=session
             />
+
+            {crate::sidebar::conversation_sidebar(engine_handle, view, sidebar_open)}
         </main>
     }
 }

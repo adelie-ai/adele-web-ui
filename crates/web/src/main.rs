@@ -27,6 +27,8 @@ mod transport;
 #[cfg(any(target_arch = "wasm32", test))]
 mod connections;
 #[cfg(any(target_arch = "wasm32", test))]
+mod context;
+#[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]
 mod personality;
@@ -34,6 +36,8 @@ mod personality;
 mod purposes;
 #[cfg(any(target_arch = "wasm32", test))]
 mod reply;
+#[cfg(any(target_arch = "wasm32", test))]
+mod sidebar;
 #[cfg(any(target_arch = "wasm32", test))]
 mod wire;
 

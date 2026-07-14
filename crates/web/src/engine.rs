@@ -11,7 +11,7 @@
 
 use std::rc::Rc;
 
-use desktop_assistant_api_model::client::ChatMessage;
+use desktop_assistant_api_model::client::{ChatMessage, ConversationSummary};
 use desktop_assistant_api_model::{
     Command, CommandResult, ConnectionConfigView, ConnectionView, ConversationModelSelectionView,
     ConversationPersonalityView, EffortLevel, ModelListing, PurposeConfigView, PurposeKindApi,
@@ -22,7 +22,8 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use client_ui_common::{
-    Effect, SelectedModel, UiMessage, WindowState, interactive_default_from_purposes,
+    ContextUsageView, Effect, SelectedModel, UiMessage, WindowState,
+    interactive_default_from_purposes,
 };
 
 use crate::connections::{CredentialAction, secret_command};
@@ -70,6 +71,13 @@ pub struct ViewSignals {
     pub effort: RwSignal<Option<EffortLevel>>,
     /// A one-shot passive toast (e.g. a dangling-model-selection fallback).
     pub toast: RwSignal<Option<String>>,
+    // --- Context-window usage (issue #14) ------------------------------------
+    /// The active conversation's latest context-window fill, or `None` before
+    /// its first turn completes / right after a conversation switch. The reducer
+    /// owns the numbers + colour bucket (`ContextUsageView`, DA#341) and paints
+    /// only the viewed conversation; the engine mirrors its `SetContextUsage`
+    /// effect here for the header indicator to render.
+    pub context_usage: RwSignal<Option<ContextUsageView>>,
     // --- Connections (issue #10) ---------------------------------------------
     /// Every configured LLM connection, refreshed on demand by the Connections
     /// panel via `ListConnections`. Panel-only state (not consumed by the chat).
@@ -109,6 +117,15 @@ pub struct ViewSignals {
     /// True while a personality load or save is in flight (drives the busy hint
     /// and disables Save).
     pub personality_busy: RwSignal<bool>,
+    // --- Conversation switcher (issue #12) -----------------------------------
+    /// Every (non-archived) conversation for the switcher sidebar, mirrored from
+    /// the reducer's `SetConversations` effect. The reducer owns the list; this
+    /// is a render mirror, so the drawer never keeps a parallel copy.
+    pub conversations: RwSignal<Vec<ConversationSummary>>,
+    /// The id of the conversation currently open, mirrored from
+    /// `WindowState::current_conversation_id`. Drives the switcher's active-row
+    /// highlight.
+    pub current_conversation_id: RwSignal<Option<String>>,
 }
 
 impl ViewSignals {
@@ -128,6 +145,7 @@ impl ViewSignals {
             stored_selection: RwSignal::new(None),
             effort: RwSignal::new(None),
             toast: RwSignal::new(None),
+            context_usage: RwSignal::new(None),
             connections: RwSignal::new(Vec::new()),
             connections_busy: RwSignal::new(false),
             connections_error: RwSignal::new(None),
@@ -139,6 +157,8 @@ impl ViewSignals {
             personality: RwSignal::new(None),
             personality_loaded: RwSignal::new(false),
             personality_busy: RwSignal::new(false),
+            conversations: RwSignal::new(Vec::new()),
+            current_conversation_id: RwSignal::new(None),
         }
     }
 }
@@ -198,6 +218,69 @@ impl Engine {
         self.dispatch(UiMessage::SubmitPrompt { prompt });
     }
 
+    // --- Conversation switcher (issue #12) -----------------------------------
+    //
+    // Three thin actions over the existing conversation plumbing, driven by the
+    // switcher drawer. The list/selection *state* stays in the shared reducer
+    // (mirrored into `conversations` / `current_conversation_id`); these only
+    // spawn the RPCs, reusing the private connect-time spawns where they exist.
+
+    /// Switch the open conversation to `id`, fetching it as a fresh switch
+    /// (`ConversationLoaded` → the reducer's `switch_to`, which caches the
+    /// transcript, applies its model selection, and re-subscribes turn events).
+    /// A no-op when `id` is already open, so re-tapping the active row doesn't
+    /// churn an evict/reload.
+    pub fn select_conversation(&self, id: String) {
+        if self.state.current_conversation_id.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.spawn_get_conversation(id, false);
+    }
+
+    /// Start a brand-new conversation and open it, reusing the connect-time
+    /// create flow (create → `ConversationCreated` → load → refetch the list).
+    pub fn new_conversation(&self) {
+        self.spawn_create_conversation();
+    }
+
+    /// Re-fetch the conversation list (list-only), delivered as
+    /// `ConversationListRefetched` so the reducer repaints ONLY the sidebar and
+    /// never disturbs the open chat or model picker. Run when the drawer opens so
+    /// it reflects any conversations added/removed by another client (#12's
+    /// load-on-open; live push is out of scope, tracked as #15).
+    pub fn refresh_conversation_list(&self) {
+        self.spawn_refetch_list();
+    }
+
+    /// Delete `id`. On the daemon's ack, feed `ConversationDeleted` so the
+    /// reducer drops the row (repainting the sidebar) and, if it was the open
+    /// conversation, clears the chat and falls back to another (or a fresh) one
+    /// via `EnsureActiveConversation`. Dropped silently when offline (the button
+    /// is gated on the connection), with the error surfaced on a transport fault.
+    pub fn delete_conversation(&self, id: String) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let tx = self.ui_tx.clone();
+        spawn_local(async move {
+            match transport
+                .send_command(Command::DeleteConversation { id: id.clone() })
+                .await
+            {
+                Ok(CommandResult::Ack) => {
+                    let _ = tx.unbounded_send(UiMessage::ConversationDeleted { id });
+                }
+                Ok(other) => {
+                    let _ = tx.unbounded_send(unexpected("DeleteConversation", &other));
+                }
+                Err(e) => {
+                    let _ =
+                        tx.unbounded_send(UiMessage::Error(format!("delete conversation: {e}")));
+                }
+            }
+        });
+    }
+
     /// Re-derive the rendered view from `WindowState` accessors.
     fn sync_view(&self) {
         let conv = self.state.current_conversation();
@@ -213,6 +296,12 @@ impl Engine {
         self.view
             .streaming_active
             .set(self.state.streaming_is_active_for_view());
+        // The switcher's active-row marker (issue #12). Re-derived after every
+        // dispatch alongside the title/messages, so a switch/create/delete moves
+        // the highlight without per-effect wiring.
+        self.view
+            .current_conversation_id
+            .set(self.state.current_conversation_id.clone());
     }
 
     fn run_effect(&mut self, effect: Effect) {
@@ -240,10 +329,20 @@ impl Engine {
             Effect::SetDefaultModel(default) => self.set_default_model(default),
             Effect::SetModelSelection(selection) => self.set_model_selection(selection),
             Effect::ShowToast(message) => self.view.toast.set(Some(message)),
-            // The message list, streaming buffer, conversation list, context
-            // usage, tasks, scratchpad, voice, and client-tool effects are
-            // either re-derived in `sync_view` or out of scope for the
-            // foundation. Deliberately ignored (their screens land later).
+            // --- Conversation switcher (issue #12) ---------------------------
+            // The reducer owns the list; mirror its repaint into the signal the
+            // switcher drawer renders (the active-row marker is mirrored in
+            // `sync_view` from `current_conversation_id`).
+            Effect::SetConversations(convs) => self.view.conversations.set(convs),
+            // --- Context-window usage (issue #14) ----------------------------
+            // The reducer emits `Some(view)` for a completed turn on the viewed
+            // conversation and `None` when switching away (clearing a stale
+            // reading); the engine just mirrors it into the indicator's signal.
+            Effect::SetContextUsage(usage) => self.view.context_usage.set(usage),
+            // The message list, streaming buffer, tasks, scratchpad, voice, and
+            // client-tool effects are either re-derived in `sync_view` or out of
+            // scope for the foundation. Deliberately ignored (their screens land
+            // later).
             _ => {}
         }
     }

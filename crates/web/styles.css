@@ -14,6 +14,7 @@
   --border: #dfe3e8;
   --danger: #c0362c;
   --ok: #2e9e5b;
+  --warn: #b8770a;
   /* Soft accent wash for selected rows / active segments. */
   --accent-soft: color-mix(in srgb, var(--accent) 14%, var(--bg));
   --scrim: rgba(20, 23, 26, 0.45);
@@ -35,6 +36,7 @@
     --border: #2a313a;
     --danger: #ff6b5e;
     --ok: #54c07d;
+    --warn: #e0a33a;
     --accent-soft: color-mix(in srgb, var(--accent) 22%, var(--bg));
     --scrim: rgba(0, 0, 0, 0.6);
   }
@@ -211,6 +213,67 @@ button {
   flex: 1;
 }
 
+/* --- Context-window usage indicator (issue #14) ---------------------------- */
+/* A slim strip above the composer: a fill bar + a compact `used / budget (pct%)`
+   readout. Colour buckets mirror the shared reducer's ContextFillLevel (DA#341):
+   muted/green under 85%, amber at/over the compaction line, red at/over budget. */
+.context-usage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.context-bar {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bubble-assistant);
+  overflow: hidden;
+}
+
+.context-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ok);
+  transition: width 240ms ease;
+}
+
+.context-readout {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-usage.context-fill-amber .context-bar-fill,
+.context-usage.context-fill-red .context-bar-fill {
+  background: var(--warn);
+}
+
+.context-usage.context-fill-amber .context-readout {
+  color: var(--warn);
+}
+
+.context-usage.context-fill-red .context-bar-fill {
+  background: var(--danger);
+}
+
+.context-usage.context-fill-red .context-readout {
+  color: var(--danger);
+}
+
+/* Users who ask for reduced motion get no bar-fill animation. */
+@media (prefers-reduced-motion: reduce) {
+  .context-bar-fill {
+    transition: none;
+  }
+}
+
 /* --- Shared controls ------------------------------------------------------- */
 /* Square icon button (settings gear, sheet close, toast dismiss). Touch-sized. */
 .icon-btn {
@@ -367,6 +430,161 @@ button {
   justify-content: flex-end;
   padding: 8px 12px;
   border-top: 1px solid var(--border);
+}
+
+/* --- Conversation switcher (left slide-in drawer) -------------------------- */
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start; /* drawer anchored to the left edge */
+  background: var(--scrim);
+  animation: backdrop-in 160ms ease-out;
+}
+
+.sidebar-drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(86vw, 340px);
+  height: 100%;
+  background: var(--bg);
+  box-shadow: 8px 0 40px rgba(0, 0, 0, 0.35);
+  padding: max(12px, var(--safe-top)) 12px max(12px, var(--safe-bottom));
+  animation: drawer-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 8px 8px;
+}
+
+.sidebar-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+/* Full-width "new conversation" affordance — thumb-reachable at the top. */
+.conv-new {
+  width: 100%;
+  min-height: 48px;
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  font-weight: 600;
+  text-align: left;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border: none;
+  border-radius: 12px;
+}
+
+.conv-new:active {
+  opacity: 0.9;
+}
+
+.conv-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.conv-list > .empty {
+  padding: 12px 4px;
+}
+
+/* A row = tappable select area + a trailing delete button. */
+.conv-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+}
+
+.conv-item.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.conv-row {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0; /* let the title ellipsize instead of overflowing */
+  min-height: 52px;
+  padding: 8px 10px;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  border-radius: 12px;
+}
+
+.conv-title {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-sub {
+  font-size: 12px;
+}
+
+.conv-del {
+  flex: none;
+  font-size: 17px;
+}
+
+/* Inline per-row delete confirmation (replaces the row in place). */
+.conv-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bubble-assistant);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: 12px;
+}
+
+.conv-confirm-q {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.conv-confirm-actions .conv-btn {
+  flex: 1;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-backdrop,
+  .sidebar-drawer {
+    animation: none;
+  }
 }
 
 /* --- Panels ---------------------------------------------------------------- */
