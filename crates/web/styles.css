@@ -316,6 +316,18 @@ button {
   background: var(--accent-soft);
 }
 
+/* Read-aloud toggle (issue #18): reuses .icon-btn sizing (44px touch target);
+   the on-state tints it so read-aloud reads as active at a glance. */
+.read-aloud-toggle {
+  flex: none;
+  font-size: 18px;
+}
+
+.read-aloud-toggle.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 /* --- Toast (passive advisory, e.g. dangling model selection) --------------- */
 .toast {
   display: flex;

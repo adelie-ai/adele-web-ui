@@ -39,6 +39,11 @@ mod model;
 mod personality;
 #[cfg(any(target_arch = "wasm32", test))]
 mod purposes;
+// Browser read-aloud (issue #18): the pure decision core (host-testable) plus a
+// `#[cfg(target_arch = "wasm32")]` `SpeechSynthesis` view — speaks completed
+// assistant replies in-browser, no daemon change.
+#[cfg(any(target_arch = "wasm32", test))]
+mod read_aloud;
 #[cfg(any(target_arch = "wasm32", test))]
 mod reply;
 #[cfg(any(target_arch = "wasm32", test))]
