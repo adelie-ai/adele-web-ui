@@ -44,6 +44,7 @@ pub enum SettingsPanel {
     Connections,
     Purposes,
     Personality,
+    GlobalPersonality,
 }
 
 impl SettingsPanel {
@@ -53,6 +54,7 @@ impl SettingsPanel {
         SettingsPanel::Connections,
         SettingsPanel::Purposes,
         SettingsPanel::Personality,
+        SettingsPanel::GlobalPersonality,
     ];
 
     fn title(self) -> &'static str {
@@ -61,16 +63,18 @@ impl SettingsPanel {
             SettingsPanel::Connections => "Connections",
             SettingsPanel::Purposes => "Purposes",
             SettingsPanel::Personality => "Personality",
+            SettingsPanel::GlobalPersonality => "Global Personality",
         }
     }
 
     /// A leading glyph for the nav tab (decorative; the title carries meaning).
     fn icon(self) -> &'static str {
         match self {
-            SettingsPanel::Model => "\u{1f9e0}",       // brain
-            SettingsPanel::Connections => "\u{1f50c}", // electric plug
-            SettingsPanel::Purposes => "\u{1f3af}",    // direct hit / target
-            SettingsPanel::Personality => "\u{1f3ad}", // performing arts / masks
+            SettingsPanel::Model => "\u{1f9e0}",             // brain
+            SettingsPanel::Connections => "\u{1f50c}",       // electric plug
+            SettingsPanel::Purposes => "\u{1f3af}",          // direct hit / target
+            SettingsPanel::Personality => "\u{1f3ad}",       // performing arts / masks
+            SettingsPanel::GlobalPersonality => "\u{1f310}", // globe with meridians
         }
     }
 }
@@ -157,6 +161,9 @@ fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> 
         SettingsPanel::Purposes => crate::purposes::purposes_panel(engine, view).into_any(),
         SettingsPanel::Personality => {
             crate::personality::personality_panel(engine, view).into_any()
+        }
+        SettingsPanel::GlobalPersonality => {
+            crate::global_personality::global_personality_panel(engine, view).into_any()
         }
     }
 }

@@ -36,27 +36,44 @@
 
 use desktop_assistant_api_model::{ConfigChanges, PersonalityLevel, PersonalitySettingsView};
 
-use crate::personality::{LEVELS, PersonalityTrait, value_from_level};
+use crate::personality::{LEVELS, PersonalityTrait, level_label, value_from_level};
 
 /// Read one trait's level out of the complete global [`PersonalitySettingsView`].
 /// Unlike the per-conversation `get` (which returns `Option`), every global trait
 /// always has a concrete level.
 pub fn get(t: PersonalityTrait, p: &PersonalitySettingsView) -> PersonalityLevel {
-    let _ = (t, p);
-    unimplemented!("global_personality::get")
+    match t {
+        PersonalityTrait::Professionalism => p.professionalism,
+        PersonalityTrait::Warmth => p.warmth,
+        PersonalityTrait::Directness => p.directness,
+        PersonalityTrait::Enthusiasm => p.enthusiasm,
+        PersonalityTrait::Humor => p.humor,
+        PersonalityTrait::Sarcasm => p.sarcasm,
+        PersonalityTrait::Pretentiousness => p.pretentiousness,
+    }
 }
 
 /// Set one trait's level in the global [`PersonalitySettingsView`].
 pub fn set(t: PersonalityTrait, p: &mut PersonalitySettingsView, level: PersonalityLevel) {
-    let _ = (t, p, level);
-    unimplemented!("global_personality::set")
+    match t {
+        PersonalityTrait::Professionalism => p.professionalism = level,
+        PersonalityTrait::Warmth => p.warmth = level,
+        PersonalityTrait::Directness => p.directness = level,
+        PersonalityTrait::Enthusiasm => p.enthusiasm = level,
+        PersonalityTrait::Humor => p.humor = level,
+        PersonalityTrait::Sarcasm => p.sarcasm = level,
+        PersonalityTrait::Pretentiousness => p.pretentiousness = level,
+    }
 }
 
 /// The `<select>` options for one trait row: exactly the five concrete levels
 /// (Never … Always) as `(value, label)` pairs. There is **no** "Global (inherit)"
 /// sentinel — a global trait is always pinned to a real level.
 pub fn row_options() -> Vec<(&'static str, &'static str)> {
-    unimplemented!("global_personality::row_options")
+    LEVELS
+        .iter()
+        .map(|&level| (value_from_level(Some(level)), level_label(level)))
+        .collect()
 }
 
 /// Map a complete global [`PersonalitySettingsView`] into a [`ConfigChanges`] that
@@ -64,8 +81,16 @@ pub fn row_options() -> Vec<(&'static str, &'static str)> {
 /// else (embeddings / persistence stay `None`). This is the exact wire payload
 /// `SetConfig` receives.
 pub fn changes_from(p: &PersonalitySettingsView) -> ConfigChanges {
-    let _ = p;
-    unimplemented!("global_personality::changes_from")
+    ConfigChanges {
+        personality_professionalism: Some(p.professionalism),
+        personality_warmth: Some(p.warmth),
+        personality_directness: Some(p.directness),
+        personality_enthusiasm: Some(p.enthusiasm),
+        personality_humor: Some(p.humor),
+        personality_sarcasm: Some(p.sarcasm),
+        personality_pretentiousness: Some(p.pretentiousness),
+        ..ConfigChanges::default()
+    }
 }
 
 /// The Leptos global-personality panel (issue #17). Re-exported from the wasm-only
@@ -276,7 +301,10 @@ mod tests {
             get(PersonalityTrait::Enthusiasm, &p),
             PersonalityLevel::Sometimes
         );
-        assert_eq!(get(PersonalityTrait::Humor, &p), PersonalityLevel::Sometimes);
+        assert_eq!(
+            get(PersonalityTrait::Humor, &p),
+            PersonalityLevel::Sometimes
+        );
         assert_eq!(get(PersonalityTrait::Sarcasm, &p), PersonalityLevel::Rarely);
         assert_eq!(
             get(PersonalityTrait::Pretentiousness, &p),
@@ -369,7 +397,10 @@ mod tests {
         // Rebuilding a config trait-by-trait via get, then mapping to changes and
         // reading each `Some` back, reproduces the original levels for all seven.
         let stored = personality(&[
-            (PersonalityTrait::Professionalism, PersonalityLevel::Sometimes),
+            (
+                PersonalityTrait::Professionalism,
+                PersonalityLevel::Sometimes,
+            ),
             (PersonalityTrait::Humor, PersonalityLevel::Never),
             (PersonalityTrait::Directness, PersonalityLevel::Always),
         ]);
