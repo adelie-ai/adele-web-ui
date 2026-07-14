@@ -34,6 +34,8 @@ mod purposes;
 #[cfg(any(target_arch = "wasm32", test))]
 mod reply;
 #[cfg(any(target_arch = "wasm32", test))]
+mod sidebar;
+#[cfg(any(target_arch = "wasm32", test))]
 mod wire;
 
 fn main() {

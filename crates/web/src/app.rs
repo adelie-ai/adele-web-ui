@@ -184,12 +184,28 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
     // tasks and top-level event handlers, which don't require `Send`).
     let engine_handle: settings::EngineHandle = StoredValue::new_local(engine.clone());
 
+    // Conversation switcher drawer (issue #12): `false` = closed. Opening
+    // refreshes the list (load-on-open) so it reflects conversations added or
+    // removed elsewhere; live push is out of scope (#15).
+    let sidebar_open = RwSignal::new(false);
+    let open_sidebar = move |_| {
+        engine_handle.with_value(|e| e.borrow().refresh_conversation_list());
+        sidebar_open.set(true);
+    };
+
     // The toast is a transient view concern; dismissing it just clears the signal.
     let dismiss_toast = move |_| view.toast.set(None);
 
     view! {
         <main class="app-shell chat">
             <header class="chat-header">
+                <button
+                    class="icon-btn"
+                    aria-label="Open conversations"
+                    on:click=open_sidebar
+                >
+                    "\u{2630}"
+                </button>
                 <span class="title">
                     {move || {
                         let t = view.title.get();
@@ -267,6 +283,8 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                 open=settings_open
                 session=session
             />
+
+            {crate::sidebar::conversation_sidebar(engine_handle, view, sidebar_open)}
         </main>
     }
 }
