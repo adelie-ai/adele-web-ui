@@ -64,3 +64,24 @@ npm test
 ```
 
 Exit code `0` = pass, `1` = assertion/panic failure, `2` = SPA not built.
+
+## `personality_panel.mjs`
+
+Browser check for the per-conversation personality panel (issue #13). Serves the
+built SPA from a **stateful** fake BFF that persists the last
+`set_conversation_personality` per conversation and returns it from
+`get_conversation`. It drives the real client round-trip in headless Chromium:
+open Settings → Personality, confirm every trait starts on **Global**, pin
+`humor = Never` and `directness = Always`, **Save** (→ `SetConversationPersonality`),
+then **reload the whole page** and assert the panel pre-fills those two traits
+from the stored override (`GetConversation` → `conversation_personality`) while
+the rest still inherit — i.e. the override genuinely persists. Fails on any
+uncaught wasm panic.
+
+The stateful fake keeps this deterministic and isolated from the shared local
+daemon. The pure trait ⇄ override mapping it renders is unit-tested under `just
+check` in `src/personality.rs`.
+
+```sh
+cd tests/e2e && npm run test:personality
+```
