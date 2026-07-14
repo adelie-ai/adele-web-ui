@@ -15,7 +15,7 @@ use desktop_assistant_api_model::client::{ChatMessage, ConversationSummary};
 use desktop_assistant_api_model::{
     Command, CommandResult, ConnectionConfigView, ConnectionView, ConversationModelSelectionView,
     ConversationPersonalityView, EffortLevel, ModelListing, PurposeConfigView, PurposeKindApi,
-    PurposesView, SendPromptOverride,
+    PurposesView, ScratchpadNoteView, SendPromptOverride,
 };
 use futures::channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
@@ -141,6 +141,15 @@ pub struct ViewSignals {
     /// True while a global-personality load or save is in flight (drives the busy
     /// hint and disables Save).
     pub global_personality_busy: RwSignal<bool>,
+    // --- Conversation scratchpad (issue #16) ---------------------------------
+    /// The active conversation's scratchpad notes (Adele's ephemeral working
+    /// notes; DA#184/#240). The reducer owns the fetch: it emits
+    /// `Effect::FetchScratchpad` on a conversation load/switch and each completed
+    /// turn, and folds the result back out as `Effect::SidePaneSetScratchpad`
+    /// (active-conversation-guarded); the engine mirrors that into this signal.
+    /// A switch clears it (empty) until the fetch returns, so notes never linger
+    /// across conversations.
+    pub scratchpad: RwSignal<Vec<ScratchpadNoteView>>,
 }
 
 impl ViewSignals {
@@ -177,6 +186,7 @@ impl ViewSignals {
             global_personality: RwSignal::new(None),
             global_personality_loaded: RwSignal::new(false),
             global_personality_busy: RwSignal::new(false),
+            scratchpad: RwSignal::new(Vec::new()),
         }
     }
 }
@@ -357,10 +367,17 @@ impl Engine {
             // conversation and `None` when switching away (clearing a stale
             // reading); the engine just mirrors it into the indicator's signal.
             Effect::SetContextUsage(usage) => self.view.context_usage.set(usage),
-            // The message list, streaming buffer, tasks, scratchpad, voice, and
-            // client-tool effects are either re-derived in `sync_view` or out of
-            // scope for the foundation. Deliberately ignored (their screens land
-            // later).
+            // --- Conversation scratchpad (issue #16) -------------------------
+            // The reducer drives the pad: `FetchScratchpad` (on load/switch and
+            // each completed turn) issues the read RPC; `SidePaneSetScratchpad`
+            // carries the fetched notes back (empty on a switch, clearing stale
+            // notes until the fetch returns). The engine spawns the fetch and
+            // mirrors the notes into the panel's signal.
+            Effect::FetchScratchpad(id) => self.spawn_fetch_scratchpad(id),
+            Effect::SidePaneSetScratchpad(notes) => self.view.scratchpad.set(notes),
+            // The message list, streaming buffer, tasks, voice, and client-tool
+            // effects are either re-derived in `sync_view` or out of scope for
+            // the foundation. Deliberately ignored (their screens land later).
             _ => {}
         }
     }
@@ -1000,6 +1017,52 @@ impl Engine {
                 let _ = tx.unbounded_send(UiMessage::Error(format!("subscribe: {e}")));
             }
         });
+    }
+
+    // --- Conversation scratchpad (issue #16) ---------------------------------
+
+    /// Read `id`'s scratchpad and feed the notes back as
+    /// `ConversationScratchpadLoaded`, which the reducer turns into
+    /// `SidePaneSetScratchpad` (dropped if the conversation was switched away
+    /// while the fetch was in flight). Runs the reducer's `FetchScratchpad`
+    /// effect; a missing transport means we're between connections, so it's
+    /// dropped (the pane keeps its last notes). Read-only — never mutates.
+    fn spawn_fetch_scratchpad(&self, id: String) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let tx = self.ui_tx.clone();
+        spawn_local(async move {
+            match transport
+                .send_command(Command::GetConversationScratchpad {
+                    conversation_id: id.clone(),
+                    max_results: None,
+                })
+                .await
+            {
+                Ok(CommandResult::Scratchpad(notes)) => {
+                    let _ = tx.unbounded_send(UiMessage::ConversationScratchpadLoaded {
+                        conversation_id: id,
+                        notes,
+                    });
+                }
+                Ok(other) => {
+                    let _ = tx.unbounded_send(unexpected("GetConversationScratchpad", &other));
+                }
+                Err(e) => {
+                    let _ = tx.unbounded_send(UiMessage::Error(format!("load scratchpad: {e}")));
+                }
+            }
+        });
+    }
+
+    /// Re-read the active conversation's scratchpad on demand (the panel's
+    /// Refresh button) — useful when another client mutated the pad without a
+    /// local turn. A no-op when there is no active conversation yet.
+    pub fn refresh_scratchpad(&self) {
+        if let Some(id) = self.state.current_conversation_id.clone() {
+            self.spawn_fetch_scratchpad(id);
+        }
     }
 
     fn spawn_create_conversation(&self) {

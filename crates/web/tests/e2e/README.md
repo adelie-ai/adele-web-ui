@@ -108,3 +108,24 @@ renders is unit-tested under `just check` in `src/global_personality.rs`.
 ```sh
 cd tests/e2e && npm run test:global-personality
 ```
+## `scratchpad_view.mjs`
+
+Browser check for the read-only conversation scratchpad panel (issue #16). The
+reducer fetches the active conversation's scratchpad on load and re-fetches
+after every completed turn, so the **stateful** fake BFF answers
+`get_conversation_scratchpad` with a note set that **changes** once a message is
+sent. It drives the real client in headless Chromium: open Settings →
+Scratchpad, assert the notes render grouped by type (a todo with an open
+checkbox + a plain note) with a `2 notes · 0 of 1 done` summary; then send a
+turn, reopen the panel, and assert it **updated in place** — the todo now struck
+through/done, a newly-added todo present, and a `3 notes · 1 of 2 done` summary.
+This proves the whole wire→reducer→engine→DOM refresh path. Fails on any
+uncaught wasm panic.
+
+The stateful fake keeps this deterministic and isolated from the shared local
+daemon (it never touches data it didn't create). The pure grouping/labelling/
+summary logic it renders is unit-tested under `just check` in `src/scratchpad.rs`.
+
+```sh
+cd tests/e2e && npm run test:scratchpad
+```

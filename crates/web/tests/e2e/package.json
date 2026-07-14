@@ -8,7 +8,8 @@
     "test:personality": "node personality_panel.mjs",
     "test:global-personality": "node global_personality_panel.mjs",
     "test:switcher": "node conversation_switcher.mjs",
-    "test:context-usage": "node context_usage_indicator.mjs"
+    "test:context-usage": "node context_usage_indicator.mjs",
+    "test:scratchpad": "node scratchpad_view.mjs"
   },
   "dependencies": {
     "playwright": "^1.48.0",
