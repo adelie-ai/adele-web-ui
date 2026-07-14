@@ -22,6 +22,20 @@ The companion unit tests in `src/reply.rs` (which *do* run under `just check`)
 cover the per-request timeout — the general backstop for any reply that is never
 delivered (stalled handler, lost/unparseable frame).
 
+## `conversation_switcher.mjs`
+
+Drives the conversation switcher (issue #12) in a real headless browser against a
+**stateful** mock BFF that keeps an in-memory conversation list. It asserts, in
+the DOM, that: the drawer lists the conversations with the open one marked;
+tapping another row switches the chat (header + active marker update); "+ New
+conversation" creates one and opens it; and deleting the one it created (via the
+inline confirm) removes its row and re-homes the view to a remaining
+conversation. Also fails on any uncaught wasm panic.
+
+A stateful mock keeps this deterministic and isolated from the shared local
+daemon (concurrent agents build against it) — the test never touches data it
+didn't create. The pure row helpers (`src/sidebar.rs`) run under `just check`.
+
 ## Running
 
 ```sh
