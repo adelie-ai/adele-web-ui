@@ -14,9 +14,9 @@ use desktop_assistant_api_model::Event;
 /// Map a wire [`Event`] onto the shared reducer's [`UiMessage`].
 ///
 /// Returns `None` for events the SPA does not surface yet — background tasks,
-/// scratchpad/knowledge sync, client-tool calls, and config pushes — so the
-/// caller can drop them. These gain arms as their screens land (each has a
-/// ready `UiMessage` counterpart in `client-ui-common`).
+/// client-tool calls, and config pushes — so the caller can drop them. These
+/// gain arms as their screens land (each has a ready `UiMessage` counterpart in
+/// `client-ui-common`).
 pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
     let msg = match event {
         Event::UserMessageAdded {
@@ -97,6 +97,13 @@ pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
         Event::ScratchpadChanged { conversation_id } => {
             UiMessage::ScratchpadChanged { conversation_id }
         }
+        // The user's long-term knowledge base changed (issue #39): a dream-cycle
+        // pass or the assistant wrote/edited an entry. The reducer returns no
+        // effect for this (the KB browser is a self-contained widget), so the
+        // engine bumps a knowledge epoch the open panel watches to re-fetch.
+        // Mapping it — rather than dropping it via the `_` arm — is what lets the
+        // panel live-update; the BFF relay broadcasts it user-scoped.
+        Event::KnowledgeChanged => UiMessage::KnowledgeChanged,
         _ => return None,
     };
     Some(msg)

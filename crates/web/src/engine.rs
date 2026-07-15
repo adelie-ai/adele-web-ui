@@ -177,6 +177,13 @@ pub struct ViewSignals {
     pub knowledge_loaded: RwSignal<bool>,
     /// The last KB-panel error, or `None`. Cleared when a load starts.
     pub knowledge_error: RwSignal<Option<String>>,
+    /// A monotonically-bumped counter the engine advances on every live
+    /// `KnowledgeChanged` (issue #39): the user's long-term KB changed under us
+    /// (a dream-cycle pass or an assistant write). The KB panel — while open —
+    /// watches this and re-runs its current view (browse or the active search),
+    /// so it live-refreshes without a manual poke. A CLOSED panel has no effect
+    /// watching this, so the bump is a cheap no-op then (no needless refetch).
+    pub knowledge_epoch: RwSignal<u64>,
 }
 
 impl ViewSignals {
@@ -219,6 +226,7 @@ impl ViewSignals {
             knowledge_busy: RwSignal::new(false),
             knowledge_loaded: RwSignal::new(false),
             knowledge_error: RwSignal::new(None),
+            knowledge_epoch: RwSignal::new(0),
         }
     }
 }
@@ -275,6 +283,13 @@ impl Engine {
                 .view
                 .last_completed_reply
                 .set(Some((request_id.clone(), full_response.clone()))),
+            // Live KB refresh (issue #39): the reducer models no KB state (it
+            // returns no effect for this), so the engine bumps a knowledge epoch
+            // the open KB panel watches to re-fetch. A wrapping counter — only
+            // the *change* matters, never the absolute value.
+            UiMessage::KnowledgeChanged => {
+                self.view.knowledge_epoch.update(|n| *n = n.wrapping_add(1))
+            }
             _ => {}
         }
         for effect in self.state.apply(msg) {
