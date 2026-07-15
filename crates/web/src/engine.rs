@@ -14,8 +14,8 @@ use std::rc::Rc;
 use desktop_assistant_api_model::client::{ChatMessage, ConversationSummary};
 use desktop_assistant_api_model::{
     Command, CommandResult, ConnectionConfigView, ConnectionView, ConversationModelSelectionView,
-    ConversationPersonalityView, EffortLevel, ModelListing, PurposeConfigView, PurposeKindApi,
-    PurposesView, ScratchpadNoteView, SendPromptOverride,
+    ConversationPersonalityView, EffortLevel, McpServerView, ModelListing, PurposeConfigView,
+    PurposeKindApi, PurposesView, ScratchpadNoteView, SendPromptOverride, ServiceAccountView,
 };
 use futures::channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
@@ -209,6 +209,23 @@ pub struct ViewSignals {
     pub tasks_loaded: RwSignal<bool>,
     /// The last tasks-snapshot error, or `None`. Cleared when a load starts.
     pub tasks_error: RwSignal<Option<String>>,
+    // --- MCP servers (issue #55) ---------------------------------------------
+    // Load-on-demand like the connections/knowledge panels (the shared reducer
+    // doesn't model MCP config). Every command blind-forwards through the BFF.
+    /// The daemon's MCP servers with their honest status, refreshed on the
+    /// panel's open and after every write.
+    pub mcp_servers: RwSignal<Vec<McpServerView>>,
+    /// True while an MCP list/write RPC is in flight (drives the loading hint and
+    /// disables Save).
+    pub mcp_busy: RwSignal<bool>,
+    /// Whether the list has loaded at least once — distinguishes "loading" from
+    /// "loaded, but empty" for the panel's empty state.
+    pub mcp_loaded: RwSignal<bool>,
+    /// The last MCP-panel error, or `None`. Cleared when a load starts.
+    pub mcp_error: RwSignal<Option<String>>,
+    /// Reusable outbound OAuth service accounts (epic #477) for the http editor's
+    /// account picker. Loaded alongside the server list.
+    pub mcp_service_accounts: RwSignal<Vec<ServiceAccountView>>,
 }
 
 impl ViewSignals {
@@ -256,6 +273,11 @@ impl ViewSignals {
             tasks_busy: RwSignal::new(false),
             tasks_loaded: RwSignal::new(false),
             tasks_error: RwSignal::new(None),
+            mcp_servers: RwSignal::new(Vec::new()),
+            mcp_busy: RwSignal::new(false),
+            mcp_loaded: RwSignal::new(false),
+            mcp_error: RwSignal::new(None),
+            mcp_service_accounts: RwSignal::new(Vec::new()),
         }
     }
 }
@@ -862,6 +884,141 @@ impl Engine {
                     "unexpected reply to ListAvailableModels: {other:?}"
                 ))),
                 Err(e) => done(Err(e)),
+            }
+        });
+    }
+
+    // --- MCP servers (issue #55) ---------------------------------------------
+    //
+    // Self-contained CRUD over the typed command-RPC, mirroring the connections
+    // methods: the spawned tasks write the MCP signals directly (single-threaded,
+    // like the transport). Every command blind-forwards through the BFF — no BFF
+    // change. Writes re-list on success so the panel reflects the daemon's truth.
+
+    /// (Re)load the MCP server list. Sets `mcp_servers` + `mcp_loaded` on
+    /// success, or `mcp_error` on failure. Called when the panel opens.
+    pub fn refresh_mcp_servers(&self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        view.mcp_busy.set(true);
+        view.mcp_error.set(None);
+        spawn_local(async move {
+            if let Err(e) = load_mcp_into(&transport, view).await {
+                view.mcp_error
+                    .set(Some(format!("Failed to load MCP servers: {e}")));
+            }
+            view.mcp_busy.set(false);
+        });
+    }
+
+    /// Load the reusable OAuth service accounts (epic #477) for the http editor's
+    /// account picker. Best-effort: a failure leaves the list empty (the picker
+    /// shows "no accounts") rather than blocking the panel.
+    pub fn refresh_service_accounts(&self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        spawn_local(async move {
+            // Best-effort: an unexpected reply or transport error leaves the
+            // picker empty rather than blocking the panel.
+            if let Ok(CommandResult::ServiceAccounts(accounts)) =
+                transport.send_command(Command::ListServiceAccounts).await
+            {
+                view.mcp_service_accounts.set(accounts);
+            }
+        });
+    }
+
+    /// Enable/disable a server, then re-list. `done` reports the outcome so the
+    /// panel can surface a failure.
+    pub fn set_mcp_enabled(&self, name: String, enabled: bool, done: ActionDone) {
+        let Some(transport) = self.transport.clone() else {
+            done(Err(
+                "Not connected — try again once reconnected.".to_string()
+            ));
+            return;
+        };
+        let view = self.view;
+        view.mcp_busy.set(true);
+        view.mcp_error.set(None);
+        spawn_local(async move {
+            let cmd = Command::SetMcpServerEnabled { name, enabled };
+            let result = ack(transport.send_command(cmd).await, "toggle MCP server");
+            if result.is_ok() {
+                let _ = load_mcp_into(&transport, view).await;
+            }
+            view.mcp_busy.set(false);
+            done(result);
+        });
+    }
+
+    /// Remove a server, then re-list. `done` reports the outcome.
+    pub fn remove_mcp_server(&self, name: String, done: ActionDone) {
+        let Some(transport) = self.transport.clone() else {
+            done(Err(
+                "Not connected — try again once reconnected.".to_string()
+            ));
+            return;
+        };
+        let view = self.view;
+        view.mcp_busy.set(true);
+        view.mcp_error.set(None);
+        spawn_local(async move {
+            let cmd = Command::RemoveMcpServer { name };
+            let result = ack(transport.send_command(cmd).await, "remove MCP server");
+            if result.is_ok() {
+                let _ = load_mcp_into(&transport, view).await;
+            }
+            view.mcp_busy.set(false);
+            done(result);
+        });
+    }
+
+    /// Create or replace a server from a `config_json` descriptor. When a bearer
+    /// `secret` is supplied it is written FIRST (`SetMcpSecret`) so the upserted
+    /// config can reference it, then the `UpsertMcpServer` lands, then the list
+    /// refreshes. `done` reports the outcome — the panel closes its form or shows
+    /// the error.
+    pub fn save_mcp_server(
+        &self,
+        config_json: String,
+        secret: Option<(String, String)>,
+        done: ActionDone,
+    ) {
+        let Some(transport) = self.transport.clone() else {
+            done(Err(
+                "Not connected — try again once reconnected.".to_string()
+            ));
+            return;
+        };
+        let view = self.view;
+        view.mcp_busy.set(true);
+        view.mcp_error.set(None);
+        spawn_local(async move {
+            // Secret value first: the upserted config references it by ref, so
+            // it must exist before the server tries to connect.
+            if let Some((id, value)) = secret {
+                let cmd = crate::mcp::mcp_secret_command(id, value);
+                if let Err(e) = ack(transport.send_command(cmd).await, "set MCP secret") {
+                    view.mcp_busy.set(false);
+                    done(Err(e));
+                    return;
+                }
+            }
+            let cmd = Command::UpsertMcpServer { config_json };
+            if let Err(e) = ack(transport.send_command(cmd).await, "save MCP server") {
+                view.mcp_busy.set(false);
+                done(Err(e));
+                return;
+            }
+            let refresh = load_mcp_into(&transport, view).await;
+            view.mcp_busy.set(false);
+            match refresh {
+                Ok(()) => done(Ok(())),
+                Err(e) => done(Err(format!("Saved, but reloading the list failed: {e}"))),
             }
         });
     }
@@ -1560,6 +1717,21 @@ async fn load_connections_into(transport: &Rc<Transport>, view: ViewSignals) -> 
             Ok(())
         }
         Ok(other) => Err(format!("unexpected reply to ListConnections: {other:?}")),
+        Err(e) => Err(e),
+    }
+}
+
+/// Run `ListMcpServers` and store the result into the MCP signals. Returns
+/// `Err` (leaving the signals untouched) on a transport/shape error so callers
+/// can surface it. Marks `mcp_loaded` on success.
+async fn load_mcp_into(transport: &Rc<Transport>, view: ViewSignals) -> Result<(), String> {
+    match transport.send_command(Command::ListMcpServers).await {
+        Ok(CommandResult::McpServers(servers)) => {
+            view.mcp_servers.set(servers);
+            view.mcp_loaded.set(true);
+            Ok(())
+        }
+        Ok(other) => Err(format!("unexpected reply to ListMcpServers: {other:?}")),
         Err(e) => Err(e),
     }
 }

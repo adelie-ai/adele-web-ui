@@ -42,6 +42,7 @@ pub enum SettingsPanel {
     #[default]
     Model,
     Connections,
+    Mcp,
     Purposes,
     Personality,
     GlobalPersonality,
@@ -55,6 +56,7 @@ impl SettingsPanel {
     pub const ALL: &'static [SettingsPanel] = &[
         SettingsPanel::Model,
         SettingsPanel::Connections,
+        SettingsPanel::Mcp,
         SettingsPanel::Purposes,
         SettingsPanel::Personality,
         SettingsPanel::GlobalPersonality,
@@ -67,6 +69,7 @@ impl SettingsPanel {
         match self {
             SettingsPanel::Model => "Model",
             SettingsPanel::Connections => "Connections",
+            SettingsPanel::Mcp => "MCP Servers",
             SettingsPanel::Purposes => "Purposes",
             SettingsPanel::Personality => "Personality",
             SettingsPanel::GlobalPersonality => "Global Personality",
@@ -81,6 +84,7 @@ impl SettingsPanel {
         match self {
             SettingsPanel::Model => "\u{1f9e0}",             // brain
             SettingsPanel::Connections => "\u{1f50c}",       // electric plug
+            SettingsPanel::Mcp => "\u{1f9e9}",               // puzzle piece
             SettingsPanel::Purposes => "\u{1f3af}",          // direct hit / target
             SettingsPanel::Personality => "\u{1f3ad}",       // performing arts / masks
             SettingsPanel::GlobalPersonality => "\u{1f310}", // globe with meridians
@@ -170,6 +174,7 @@ fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> 
         SettingsPanel::Connections => {
             crate::connections::connections_panel(engine, view).into_any()
         }
+        SettingsPanel::Mcp => crate::mcp::mcp_panel(engine, view).into_any(),
         SettingsPanel::Purposes => crate::purposes::purposes_panel(engine, view).into_any(),
         SettingsPanel::Personality => {
             crate::personality::personality_panel(engine, view).into_any()

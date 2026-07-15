@@ -21,7 +21,8 @@
     "test:reauth": "node reauth_recovery.mjs",
     "test:nav-layout": "node settings_nav_layout.mjs",
     "test:bedrock-credentials": "node bedrock_credentials.mjs",
-    "test:model-refresh": "node connection_model_refresh.mjs"
+    "test:model-refresh": "node connection_model_refresh.mjs",
+    "test:mcp": "node mcp_panel.mjs"
   },
   "dependencies": {
     "playwright": "^1.48.0",

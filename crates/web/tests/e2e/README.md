@@ -359,3 +359,31 @@ browser-render + live-update layer they can't reach.
 ```sh
 cd tests/e2e && npm run test:tasks
 ```
+
+## `mcp_panel.mjs`
+
+Browser check for the MCP-servers admin panel (issue #55). A **stateful** fake
+BFF answers `list_mcp_servers` from a swappable snapshot (a running stdio server
+and an unauthorized OAuth http server) and records
+`set_mcp_server_enabled` / `upsert_mcp_server` / `remove_mcp_server` /
+`set_mcp_secret`, mutating the snapshot so a re-list reflects each write. It
+drives the real client in headless Chromium and asserts, over the full
+form→build→command→re-list→DOM path: (1) Settings → MCP Servers lists servers
+with status, tool count ("4 tools"), and the transport chip (local/remote), and
+renders the honest desktop sign-in note for the unauthorized OAuth server with
+**no** functional web sign-in button; (2) toggling a server sends
+`set_mcp_server_enabled` and the row shows "Disabled" after the re-list; (3)
+removing a server via the inline confirm sends `remove_mcp_server` and drops the
+card; (4) Add (stdio) sends a well-formed `upsert_mcp_server { config_json }`
+(name/command/space-split args, no `http` block); and (5) a Bearer save sends
+`set_mcp_secret` under the `{name}_token` ref **before** the `upsert_mcp_server`
+that references it. Fails on any uncaught wasm panic.
+
+The pure `config_json` DTO mapping, status/transport display vocabulary,
+env/args/scope parsers, and the `{name}_token` ref + redacted `SetMcpSecret`
+command are unit-tested under `just check` in `src/mcp.rs`; this covers only the
+browser render + write-ordering layer those host tests can't reach.
+
+```sh
+cd tests/e2e && npm run test:mcp
+```
