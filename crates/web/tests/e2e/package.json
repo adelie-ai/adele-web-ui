@@ -14,6 +14,7 @@
     "test:scratchpad": "node scratchpad_view.mjs",
     "test:knowledge": "node knowledge_panel.mjs",
     "test:knowledge-live": "node knowledge_live_refresh.mjs",
+    "test:tasks": "node tasks_panel.mjs",
     "test:read-aloud": "node read_aloud.mjs",
     "test:markdown": "node chat_markdown.mjs",
     "test:markdown-xss": "node chat_markdown_xss.mjs",

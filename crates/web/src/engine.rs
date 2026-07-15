@@ -192,6 +192,23 @@ pub struct ViewSignals {
     /// so it live-refreshes without a manual poke. A CLOSED panel has no effect
     /// watching this, so the bump is a cheap no-op then (no needless refetch).
     pub knowledge_epoch: RwSignal<u64>,
+    // --- Background tasks (issue #50) ----------------------------------------
+    // Unlike the load-on-demand panels, tasks ARE modelled by the shared reducer:
+    // the engine mirrors its `Effect::Task*` family (fed from relayed, user-scoped
+    // `Event::Task*`) into this signal, so the panel is a plain reactive render of
+    // it. An authoritative `ListBackgroundTasks` snapshot seeds it on open and
+    // reconciles terminal statuses on completion.
+    /// Active + recent background tasks (most-recent-first), kept live: seeded by
+    /// `refresh_tasks`' snapshot and updated by the mirrored task effects.
+    pub tasks: RwSignal<Vec<desktop_assistant_api_model::TaskView>>,
+    /// True while a `ListBackgroundTasks` snapshot is in flight (loading hint).
+    pub tasks_busy: RwSignal<bool>,
+    /// Whether the list has been snapshotted at least once — distinguishes
+    /// "loading" from "loaded, but empty", and gates the completion re-fetch so a
+    /// never-opened panel does no work.
+    pub tasks_loaded: RwSignal<bool>,
+    /// The last tasks-snapshot error, or `None`. Cleared when a load starts.
+    pub tasks_error: RwSignal<Option<String>>,
 }
 
 impl ViewSignals {
@@ -235,6 +252,10 @@ impl ViewSignals {
             knowledge_loaded: RwSignal::new(false),
             knowledge_error: RwSignal::new(None),
             knowledge_epoch: RwSignal::new(0),
+            tasks: RwSignal::new(Vec::new()),
+            tasks_busy: RwSignal::new(false),
+            tasks_loaded: RwSignal::new(false),
+            tasks_error: RwSignal::new(None),
         }
     }
 }
@@ -585,9 +606,34 @@ impl Engine {
             // mirrors the notes into the panel's signal.
             Effect::FetchScratchpad(id) => self.spawn_fetch_scratchpad(id),
             Effect::SidePaneSetScratchpad(notes) => self.view.scratchpad.set(notes),
-            // The message list, streaming buffer, tasks, voice, and client-tool
-            // effects are either re-derived in `sync_view` or out of scope for
-            // the foundation. Deliberately ignored (their screens land later).
+            // --- Background tasks (issue #50) --------------------------------
+            // The reducer models the task lifecycle and emits these host-facing
+            // effects (the GTK client feeds them into its `TasksModel`); the
+            // engine mirrors them into the `tasks` signal the panel renders. The
+            // small list mutations live in `crate::tasks`, host-tested.
+            Effect::TasksReplaceAll(tasks) => self.view.tasks.set(tasks),
+            Effect::TaskStarted(task) => self
+                .view
+                .tasks
+                .update(|list| crate::tasks::upsert(list, task)),
+            Effect::TaskProgress { id, progress_hint } => self
+                .view
+                .tasks
+                .update(|list| crate::tasks::apply_progress(list, &id, progress_hint)),
+            // The reducer's completion effect carries only the id — not the
+            // terminal `Completed`/`Failed`/`Cancelled` status. Re-fetch the
+            // authoritative snapshot so the finished task shows its real status
+            // and stays visible as "recent", but only once the panel has been
+            // opened (the guard: a never-opened panel does no work — an
+            // un-guarded completion falls through to the `_` arm below).
+            // `RefreshSidePaneTasks` is a GTK conversation-side-pane concern with
+            // no web analogue and is likewise ignored there.
+            Effect::TaskCompleted { .. } if self.view.tasks_loaded.get_untracked() => {
+                self.refresh_tasks()
+            }
+            // The message list, streaming buffer, per-task logs, voice, and
+            // client-tool effects are either re-derived in `sync_view` or out of
+            // scope. Deliberately ignored.
             _ => {}
         }
     }
@@ -1376,6 +1422,55 @@ impl Engine {
                 }
             }
             view.knowledge_busy.set(false);
+        });
+    }
+
+    // --- Background tasks (issue #50) ----------------------------------------
+    //
+    // Tasks ARE reducer state (the `Effect::Task*` arms in `run_effect` mirror
+    // the lifecycle into `view.tasks`), but the initial/authoritative list is an
+    // RPC. `refresh_tasks` snapshots the daemon's active + recent tasks and feeds
+    // them back as `TasksLoaded`, which the reducer turns into `TasksReplaceAll`.
+    // Called on the panel's open + Refresh, and again after a completion to
+    // reconcile terminal statuses. Blind-forwards through the BFF (no BFF change).
+
+    /// Snapshot the daemon's active + recent background tasks
+    /// (`ListBackgroundTasks { include_finished: true }`, most-recent-first) into
+    /// `view.tasks` via `TasksLoaded`. Last-good results stay visible while a
+    /// load is in flight (no flicker); a failure surfaces on `tasks_error` and
+    /// leaves them intact. A missing transport means we're between connections,
+    /// so it's dropped. Read-only — never mutates a task.
+    pub fn refresh_tasks(&self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        let tx = self.ui_tx.clone();
+        view.tasks_busy.set(true);
+        view.tasks_error.set(None);
+        spawn_local(async move {
+            match transport
+                .send_command(Command::ListBackgroundTasks {
+                    include_finished: true,
+                    limit: Some(crate::tasks::TASKS_LIMIT),
+                })
+                .await
+            {
+                Ok(CommandResult::BackgroundTasks(tasks)) => {
+                    view.tasks_loaded.set(true);
+                    let _ = tx.unbounded_send(UiMessage::TasksLoaded(tasks));
+                }
+                Ok(other) => {
+                    view.tasks_error.set(Some(format!(
+                        "unexpected reply to ListBackgroundTasks: {other:?}"
+                    )));
+                }
+                Err(e) => {
+                    view.tasks_error
+                        .set(Some(format!("Background tasks error: {e}")));
+                }
+            }
+            view.tasks_busy.set(false);
         });
     }
 

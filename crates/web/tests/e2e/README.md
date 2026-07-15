@@ -334,3 +334,28 @@ layer those host tests can't reach.
 ```sh
 cd tests/e2e && npm run test:markdown-xss
 ```
+## `tasks_panel.mjs`
+
+Browser check for the background-tasks panel (issue #50). A fake BFF answers
+`list_background_tasks` from a **swappable snapshot** (counting the reads) and
+— while the Tasks panel is open — **pushes** unsolicited `task_*` event frames,
+the same user-scoped broadcast the real relay does. It drives the real client in
+headless Chromium and asserts the whole relay→wire→reducer→engine→DOM path: (1)
+opening Tasks reads the snapshot **once** and shows the running task with its
+title + "Running"; (2) a pushed `task_progress` updates the row's hint **in
+place** with **no** refetch; (3) a pushed `task_started` for a NEW task adds a
+second row **at the top**, live; (4) a pushed `task_completed` (whose reducer
+effect carries no status) makes the engine **re-fetch** the authoritative
+snapshot exactly once, so the finished task shows its real terminal status
+("Completed") and stays visible as "recent" (it is not dropped), with the header
+summary now reading the active/recent split. Fails on any uncaught wasm panic.
+
+The pure formatting/list helpers it renders (status class/label, kind label,
+age, summary, upsert, apply_progress) are unit-tested under `just check` in
+`src/tasks.rs`; the wire mapping in `src/wire.rs` and the relay broadcast in
+`crates/server/src/relay.rs` are likewise host-tested. This covers only the
+browser-render + live-update layer they can't reach.
+
+```sh
+cd tests/e2e && npm run test:tasks
+```

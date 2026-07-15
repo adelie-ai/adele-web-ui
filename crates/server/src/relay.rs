@@ -81,11 +81,16 @@ const RELAY_ORIGIN_SESSION: &str = "__bff_relay__";
 /// receiving browser's own send, so it keeps the daemon's `request_id` (the
 /// reducer routes a not-initiated turn by that stable id).
 ///
-/// Returns `None` for signals the web UI does not surface — background `Task*`
-/// (no process-manager panel) and `ClientToolCall` (the web client is not an MCP
-/// host) — and for the `Disconnected` control signal. `KnowledgeChanged` DOES
-/// map (#39); it carries no conversation, so [`relay_signal`] broadcasts it
-/// user-scoped rather than routing by conversation.
+/// The background-task lifecycle (`TaskStarted` / `TaskProgress` /
+/// `TaskCompleted`) DOES map now (the tasks panel, #50). Like `KnowledgeChanged`
+/// (#39) these carry no conversation, so [`relay_signal`] broadcasts them
+/// user-scoped rather than routing by conversation. `TaskLogAppended` stays
+/// unsurfaced — the panel shows status/progress, not per-task logs, so its
+/// (potentially large) log payloads are never shipped to the browser.
+///
+/// Returns `None` for the remaining unsurfaced signals — `TaskLogAppended`
+/// (above) and `ClientToolCall` (the web client is not an MCP host) — and for
+/// the `Disconnected` control signal.
 pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
     match signal {
         SignalEvent::UserMessageAdded {
@@ -172,12 +177,28 @@ pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
         // conversation, so `relay_signal` broadcasts it to all of the user's
         // sessions rather than routing by conversation.
         SignalEvent::KnowledgeChanged => Some(api::Event::KnowledgeChanged),
-        // Not surfaced by the web UI (no process-manager panel, not an MCP host),
-        // and `Disconnected` is a control signal handled by the loop.
-        SignalEvent::TaskStarted { .. }
-        | SignalEvent::TaskProgress { .. }
-        | SignalEvent::TaskLogAppended { .. }
-        | SignalEvent::TaskCompleted { .. }
+        // User-scoped (#50): the background-task lifecycle. Like KnowledgeChanged
+        // these carry no conversation, so `relay_signal` broadcasts them to all
+        // of the user's sessions so an open tasks panel live-updates.
+        SignalEvent::TaskStarted { task } => Some(api::Event::TaskStarted { task: task.clone() }),
+        SignalEvent::TaskProgress { id, progress_hint } => Some(api::Event::TaskProgress {
+            id: id.clone(),
+            progress_hint: progress_hint.clone(),
+        }),
+        SignalEvent::TaskCompleted {
+            id,
+            status,
+            last_error,
+        } => Some(api::Event::TaskCompleted {
+            id: id.clone(),
+            status: *status,
+            last_error: last_error.clone(),
+        }),
+        // Not surfaced by the web UI: `TaskLogAppended` (the panel shows status/
+        // progress, not per-task logs, so log payloads are never shipped) and
+        // `ClientToolCall` (not an MCP host); `Disconnected` is a control signal
+        // handled by the loop.
+        SignalEvent::TaskLogAppended { .. }
         | SignalEvent::ClientToolCall { .. }
         | SignalEvent::Disconnected { .. } => None,
     }
@@ -468,14 +489,23 @@ mod tests {
     }
 
     #[test]
-    fn background_and_control_signals_are_not_relayed() {
-        // The web UI has no process-manager panel, is not an MCP host, and
+    fn unsurfaced_and_control_signals_are_not_relayed() {
+        // `TaskLogAppended` is unsurfaced (the tasks panel shows status/progress,
+        // not per-task logs — #50), the web UI is not an MCP host, and
         // `Disconnected` is a control signal — none map to a relayable event.
-        // (`KnowledgeChanged` IS relayed now, user-scoped — see its own tests.)
+        // (`KnowledgeChanged` and the Task* lifecycle ARE relayed now,
+        // user-scoped — see their own tests.)
         for signal in [
-            SignalEvent::TaskProgress {
+            SignalEvent::TaskLogAppended {
                 id: "t1".into(),
-                progress_hint: None,
+                entry: api::TaskLogEntry {
+                    seq: 1,
+                    timestamp: 0,
+                    level: api::LogLevel::Info,
+                    category: api::LogCategory::Status,
+                    message: "hi".into(),
+                    data: None,
+                },
             },
             SignalEvent::ClientToolCall {
                 task_id: "t1".into(),
@@ -501,8 +531,9 @@ mod tests {
         // The routing invariant for CONVERSATION-scoped events: each MUST carry a
         // conversation id so `relay_signal` routes rather than drops it. Pin the
         // whole conversation-scoped set so a new such variant can't forget one.
-        // (The one user-scoped exception, `KnowledgeChanged`, deliberately has no
-        // conversation and is broadcast instead — see its own tests.)
+        // (The user-scoped exceptions — `KnowledgeChanged` and the Task*
+        // lifecycle — deliberately carry no conversation and are broadcast
+        // instead; see their own tests.)
         let relayed = [
             SignalEvent::UserMessageAdded {
                 conversation_id: "c1".into(),
@@ -683,6 +714,122 @@ mod tests {
         assert!(
             intruder.0.lock().unwrap().is_empty(),
             "another user's session must never receive the KB broadcast"
+        );
+    }
+
+    // --- Background tasks (issue #50) -----------------------------------------
+
+    fn sample_task(id: &str) -> api::TaskView {
+        api::TaskView {
+            id: api::TaskId(id.to_string()),
+            kind: api::TaskKind::Standalone {
+                name: "agent".to_string(),
+                conversation_id: "c1".to_string(),
+            },
+            status: api::TaskStatus::Running,
+            started_at: 1_700_000_000_000,
+            ended_at: None,
+            last_error: None,
+            parent: None,
+            children: vec![],
+            title: "Research".to_string(),
+            progress_hint: None,
+        }
+    }
+
+    #[test]
+    fn task_started_maps_preserving_the_task_view() {
+        let ev = relay_signal_to_event(&SignalEvent::TaskStarted {
+            task: sample_task("t1"),
+        })
+        .expect("TaskStarted must relay to the tasks panel (#50)");
+        assert!(matches!(
+            ev,
+            api::Event::TaskStarted { task } if task.id.0 == "t1" && task.title == "Research"
+        ));
+    }
+
+    #[test]
+    fn task_progress_maps_preserving_id_and_hint() {
+        let ev = relay_signal_to_event(&SignalEvent::TaskProgress {
+            id: "t1".into(),
+            progress_hint: Some("step 2/4".into()),
+        })
+        .expect("TaskProgress must relay (#50)");
+        assert!(matches!(
+            ev,
+            api::Event::TaskProgress { id, progress_hint }
+                if id == "t1" && progress_hint.as_deref() == Some("step 2/4")
+        ));
+    }
+
+    #[test]
+    fn task_completed_maps_preserving_terminal_status() {
+        let ev = relay_signal_to_event(&SignalEvent::TaskCompleted {
+            id: "t1".into(),
+            status: api::TaskStatus::Failed,
+            last_error: Some("boom".into()),
+        })
+        .expect("TaskCompleted must relay (#50)");
+        assert!(matches!(
+            ev,
+            api::Event::TaskCompleted { id, status, last_error }
+                if id == "t1" && status == api::TaskStatus::Failed && last_error.as_deref() == Some("boom")
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_events_broadcast_to_every_user_session_regardless_of_subscription() {
+        // Task events are user-scoped (they carry no conversation to route on),
+        // so — like `KnowledgeChanged` (#39) — they must reach EVERY one of the
+        // user's sessions whatever each is viewing, so an open tasks panel
+        // live-updates.
+        let subs = ConversationSubscriptions::new();
+        let a = viewer(&subs, "sess-1", USER, &["c1"]);
+        let b = viewer(&subs, "sess-2", USER, &["c2"]);
+        let c = viewer(&subs, "sess-3", USER, &[]); // subscribed to nothing
+
+        let signal = SignalEvent::TaskProgress {
+            id: "t1".into(),
+            progress_hint: Some("step 2/4".into()),
+        };
+        assert!(
+            relay_signal(&signal, &subs, USER).await,
+            "TaskProgress must be relayed (broadcast), not dropped"
+        );
+
+        for (name, sink) in [("A", &a), ("B", &b), ("C", &c)] {
+            let got = sink.0.lock().unwrap();
+            assert!(
+                matches!(got.as_slice(), [api::Event::TaskProgress { id, .. }] if id == "t1"),
+                "session {name} must receive the user-scoped task event, got {got:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_broadcast_does_not_cross_the_user_boundary() {
+        // Trust boundary (#432): a DIFFERENT user's session — even subscribed to
+        // the same conversation ids — is never delivered another user's task
+        // events.
+        let subs = ConversationSubscriptions::new();
+        let intruder = viewer(&subs, "sess-evil", OTHER_USER, &["c1"]);
+
+        assert!(
+            relay_signal(
+                &SignalEvent::TaskStarted {
+                    task: sample_task("t1")
+                },
+                &subs,
+                USER
+            )
+            .await,
+            "routed"
+        );
+
+        assert!(
+            intruder.0.lock().unwrap().is_empty(),
+            "another user's session must never receive relayed task events"
         );
     }
 

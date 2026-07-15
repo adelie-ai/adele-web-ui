@@ -65,6 +65,11 @@ mod reply;
 mod scratchpad;
 #[cfg(any(target_arch = "wasm32", test))]
 mod sidebar;
+// Background-tasks panel (issue #50): pure formatting/list helpers host-tested
+// here, plus a `#[cfg(target_arch = "wasm32")]` Leptos panel that renders the
+// engine's live `tasks` signal.
+#[cfg(any(target_arch = "wasm32", test))]
+mod tasks;
 #[cfg(any(target_arch = "wasm32", test))]
 mod wire;
 

@@ -1568,4 +1568,120 @@ button {
   border: none;
   border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
   margin: 0.8em 0;
+/* --- Background tasks panel (issue #50) ------------------------------------ */
+.task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tasks-panel .task-row:last-of-type {
+  border-bottom: none;
+}
+
+/* Status dot — colour is the at-a-glance signal; the readable status label
+   backs it up so colour is never the only cue. */
+.task-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.task-dot-pending {
+  background: var(--warn);
+}
+
+.task-dot-running {
+  background: var(--accent);
+  /* Gentle pulse so an in-flight task reads as alive. */
+  animation: task-pulse 1.6s ease-in-out infinite;
+}
+
+.task-dot-completed {
+  background: var(--ok);
+}
+
+.task-dot-failed {
+  background: var(--danger);
+}
+
+.task-dot-cancelled {
+  background: var(--muted);
+}
+
+@keyframes task-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-dot-running {
+    animation: none;
+  }
+}
+
+.task-main {
+  flex: 1 1 auto;
+  min-width: 0; /* let the title ellipsize instead of overflowing the row */
+}
+
+.task-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.task-kind {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.task-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-hint {
+  margin: 2px 0 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-meta {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+}
+
+.task-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.task-age {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
