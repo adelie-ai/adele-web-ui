@@ -966,6 +966,15 @@ button {
   height: 20px;
 }
 
+/* Per-connection "Refresh models" action (item 3). Full-width, touch-sized. */
+.conn-refresh-btn {
+  width: 100%;
+}
+
+.conn-refresh-status {
+  margin-top: 8px;
+}
+
 .conn-locked {
   margin: 0;
   padding: 10px 12px;

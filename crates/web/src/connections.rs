@@ -500,7 +500,7 @@ mod view {
         ConnForm, ConnectorKind, PreservedFields, availability_is_ok, availability_label,
         credentials_label,
     };
-    use crate::engine::{ActionDone, ViewSignals};
+    use crate::engine::{ActionDone, ModelsRefreshed, ViewSignals};
     use crate::settings::EngineHandle;
     use desktop_assistant_api_model::ConnectionView;
 
@@ -528,6 +528,9 @@ mod view {
         /// Whether the connection being edited already has a stored credential
         /// (display-only — the secret itself is never fetched).
         has_credentials: RwSignal<bool>,
+        /// The inline result of the per-connection "Refresh models" action
+        /// (item 3), or `None` before it's used. Reset on every form open.
+        refresh_status: RwSignal<Option<String>>,
         error: RwSignal<Option<String>>,
     }
 
@@ -549,6 +552,7 @@ mod view {
                 clear_secret: RwSignal::new(false),
                 preserved: RwSignal::new(PreservedFields::default()),
                 has_credentials: RwSignal::new(false),
+                refresh_status: RwSignal::new(None),
                 error: RwSignal::new(None),
             }
         }
@@ -569,6 +573,7 @@ mod view {
             self.clear_secret.set(f.clear_secret);
             self.preserved.set(f.preserved);
             self.has_credentials.set(has_credentials);
+            self.refresh_status.set(None);
             self.error.set(None);
             self.open.set(true);
         }
@@ -914,6 +919,17 @@ mod view {
                 // Credential entry (hidden for connectors that take none).
                 {move || credential_section(form)}
 
+                // Per-connection "Refresh models" (edit only — a connection must
+                // exist to refresh it). All connectors can refresh; Bedrock (which
+                // caches its model list) is the motivating case.
+                {move || {
+                    if form.editing_id.get().is_some() {
+                        refresh_models_section(engine, form).into_any()
+                    } else {
+                        ().into_any()
+                    }
+                }}
+
                 <Show when=move || form.error.get().is_some()>
                     <p class="conn-error" role="alert">
                         {move || form.error.get().unwrap_or_default()}
@@ -1062,6 +1078,42 @@ mod view {
                     prop:value=move || value.get()
                     on:input=move |ev| value.set(event_target_value(&ev))
                 />
+            </div>
+        }
+    }
+
+    /// The per-connection "Refresh models" action (item 3), shown only when
+    /// editing an existing connection. Triggers a cache-bypassing
+    /// `ListAvailableModels { connection_id, refresh: true }` and shows the
+    /// resulting model count (or an error) inline. Mirrors the KCM's Bedrock
+    /// "Refresh models" button, but offered for every connector.
+    fn refresh_models_section(engine: EngineHandle, form: FormState) -> impl IntoView {
+        let status = form.refresh_status;
+        let on_refresh = move |_| {
+            let Some(id) = form.editing_id.get_untracked() else {
+                return;
+            };
+            status.set(Some("Refreshing\u{2026}".to_string()));
+            let done: ModelsRefreshed = Rc::new(move |res: Result<usize, String>| match res {
+                Ok(count) => status.set(Some(format!(
+                    "{count} model{} available",
+                    if count == 1 { "" } else { "s" }
+                ))),
+                Err(e) => status.set(Some(format!("Refresh failed: {e}"))),
+            });
+            engine.with_value(|e| e.borrow().refresh_connection_models(id, done));
+        };
+        view! {
+            <div class="field conn-refresh">
+                <span class="field-label">"Models"</span>
+                <button class="conn-btn conn-refresh-btn" on:click=on_refresh>
+                    "\u{21bb} Refresh models"
+                </button>
+                <Show when=move || status.get().is_some()>
+                    <p class="conn-note muted conn-refresh-status" role="status">
+                        {move || status.get().unwrap_or_default()}
+                    </p>
+                </Show>
             </div>
         }
     }
@@ -1232,7 +1284,9 @@ mod tests {
     fn bedrock_credential_action_sets_joined_value() {
         assert_eq!(
             bedrock_credential_action("AKIAEXAMPLE", "wJalr/secret", "", false),
-            Some(CredentialAction::Set("AKIAEXAMPLE:wJalr/secret".to_string()))
+            Some(CredentialAction::Set(
+                "AKIAEXAMPLE:wJalr/secret".to_string()
+            ))
         );
     }
 
