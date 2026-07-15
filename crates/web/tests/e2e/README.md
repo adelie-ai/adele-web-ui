@@ -36,6 +36,19 @@ A stateful mock keeps this deterministic and isolated from the shared local
 daemon (concurrent agents build against it) — the test never touches data it
 didn't create. The pure row helpers (`src/sidebar.rs`) run under `just check`.
 
+## `conversation_rename_archive.mjs`
+
+Drives conversation **rename + archive** (issue #49) against a stateful mock BFF
+that keeps per-conversation `title` + `archived` and honours `include_archived`
+on `list_conversations` exactly like the daemon. It asserts, in the DOM, that:
+renaming the **open** conversation inline updates both its sidebar row and the
+header title (the header via a re-fetch that reads the persisted title, proving
+persistence); archiving another conversation removes it from the default list;
+expanding the **Archived** disclosure lists it; and Unarchive returns it to the
+default list and drops it from the section. Also fails on any uncaught wasm
+panic. The pure decision logic (`effective_rename` / `archived_only` in
+`src/conversation_manage.rs`) runs under `just check`.
+
 ## `context_usage_indicator.mjs`
 
 Coverage for the context-window usage indicator (issue #14). The fake BFF acks a
