@@ -686,6 +686,122 @@ mod tests {
         );
     }
 
+    // --- Background tasks (issue #50) -----------------------------------------
+
+    fn sample_task(id: &str) -> api::TaskView {
+        api::TaskView {
+            id: api::TaskId(id.to_string()),
+            kind: api::TaskKind::Standalone {
+                name: "agent".to_string(),
+                conversation_id: "c1".to_string(),
+            },
+            status: api::TaskStatus::Running,
+            started_at: 1_700_000_000_000,
+            ended_at: None,
+            last_error: None,
+            parent: None,
+            children: vec![],
+            title: "Research".to_string(),
+            progress_hint: None,
+        }
+    }
+
+    #[test]
+    fn task_started_maps_preserving_the_task_view() {
+        let ev = relay_signal_to_event(&SignalEvent::TaskStarted {
+            task: sample_task("t1"),
+        })
+        .expect("TaskStarted must relay to the tasks panel (#50)");
+        assert!(matches!(
+            ev,
+            api::Event::TaskStarted { task } if task.id.0 == "t1" && task.title == "Research"
+        ));
+    }
+
+    #[test]
+    fn task_progress_maps_preserving_id_and_hint() {
+        let ev = relay_signal_to_event(&SignalEvent::TaskProgress {
+            id: "t1".into(),
+            progress_hint: Some("step 2/4".into()),
+        })
+        .expect("TaskProgress must relay (#50)");
+        assert!(matches!(
+            ev,
+            api::Event::TaskProgress { id, progress_hint }
+                if id == "t1" && progress_hint.as_deref() == Some("step 2/4")
+        ));
+    }
+
+    #[test]
+    fn task_completed_maps_preserving_terminal_status() {
+        let ev = relay_signal_to_event(&SignalEvent::TaskCompleted {
+            id: "t1".into(),
+            status: api::TaskStatus::Failed,
+            last_error: Some("boom".into()),
+        })
+        .expect("TaskCompleted must relay (#50)");
+        assert!(matches!(
+            ev,
+            api::Event::TaskCompleted { id, status, last_error }
+                if id == "t1" && status == api::TaskStatus::Failed && last_error.as_deref() == Some("boom")
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_events_broadcast_to_every_user_session_regardless_of_subscription() {
+        // Task events are user-scoped (they carry no conversation to route on),
+        // so — like `KnowledgeChanged` (#39) — they must reach EVERY one of the
+        // user's sessions whatever each is viewing, so an open tasks panel
+        // live-updates.
+        let subs = ConversationSubscriptions::new();
+        let a = viewer(&subs, "sess-1", USER, &["c1"]);
+        let b = viewer(&subs, "sess-2", USER, &["c2"]);
+        let c = viewer(&subs, "sess-3", USER, &[]); // subscribed to nothing
+
+        let signal = SignalEvent::TaskProgress {
+            id: "t1".into(),
+            progress_hint: Some("step 2/4".into()),
+        };
+        assert!(
+            relay_signal(&signal, &subs, USER).await,
+            "TaskProgress must be relayed (broadcast), not dropped"
+        );
+
+        for (name, sink) in [("A", &a), ("B", &b), ("C", &c)] {
+            let got = sink.0.lock().unwrap();
+            assert!(
+                matches!(got.as_slice(), [api::Event::TaskProgress { id, .. }] if id == "t1"),
+                "session {name} must receive the user-scoped task event, got {got:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_broadcast_does_not_cross_the_user_boundary() {
+        // Trust boundary (#432): a DIFFERENT user's session — even subscribed to
+        // the same conversation ids — is never delivered another user's task
+        // events.
+        let subs = ConversationSubscriptions::new();
+        let intruder = viewer(&subs, "sess-evil", OTHER_USER, &["c1"]);
+
+        assert!(
+            relay_signal(
+                &SignalEvent::TaskStarted {
+                    task: sample_task("t1")
+                },
+                &subs,
+                USER
+            )
+            .await,
+            "routed"
+        );
+
+        assert!(
+            intruder.0.lock().unwrap().is_empty(),
+            "another user's session must never receive relayed task events"
+        );
+    }
+
     #[tokio::test]
     async fn disconnected_signal_routes_nothing_and_does_not_panic() {
         // The relay must survive a `Disconnected` on the daemon stream: it maps

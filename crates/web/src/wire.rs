@@ -376,14 +376,109 @@ mod tests {
         ));
     }
 
+    // --- Background tasks (issue #50) ----------------------------------------
+
+    fn sample_task(id: &str) -> desktop_assistant_api_model::TaskView {
+        use desktop_assistant_api_model::{TaskId, TaskKind, TaskStatus, TaskView};
+        TaskView {
+            id: TaskId(id.to_string()),
+            kind: TaskKind::Standalone {
+                name: "agent".to_string(),
+                conversation_id: "c1".to_string(),
+            },
+            status: TaskStatus::Running,
+            started_at: 1_700_000_000_000,
+            ended_at: None,
+            last_error: None,
+            parent: None,
+            children: vec![],
+            title: "Research".to_string(),
+            progress_hint: None,
+        }
+    }
+
     #[test]
-    fn unsurfaced_event_maps_to_none() {
-        // Background `Task*` events have no web screen (no process manager), so
-        // they still drop through the `_` arm to `None`.
-        assert!(
-            event_to_ui_message(Event::TaskProgress {
+    fn task_started_maps_to_ui_task_started() {
+        let ev = Event::TaskStarted {
+            task: sample_task("t1"),
+        };
+        assert!(matches!(
+            event_to_ui_message(ev),
+            Some(UiMessage::TaskStarted(task)) if task.id.0 == "t1" && task.title == "Research"
+        ));
+    }
+
+    #[test]
+    fn task_progress_maps_to_ui_task_progress() {
+        let ev = Event::TaskProgress {
+            id: "t1".to_string(),
+            progress_hint: Some("step 2/4".to_string()),
+        };
+        assert!(matches!(
+            event_to_ui_message(ev),
+            Some(UiMessage::TaskProgress { id, progress_hint })
+                if id == "t1" && progress_hint.as_deref() == Some("step 2/4")
+        ));
+    }
+
+    #[test]
+    fn task_completed_maps_to_ui_task_completed_dropping_status() {
+        // The reducer's `UiMessage::TaskCompleted` carries only the id; the
+        // terminal status is reflected by the engine's authoritative re-fetch.
+        let ev = Event::TaskCompleted {
+            id: "t1".to_string(),
+            status: desktop_assistant_api_model::TaskStatus::Failed,
+            last_error: Some("boom".to_string()),
+        };
+        assert!(matches!(
+            event_to_ui_message(ev),
+            Some(UiMessage::TaskCompleted { id }) if id == "t1"
+        ));
+    }
+
+    #[test]
+    fn task_lifecycle_event_set_all_map() {
+        // Pin the lifecycle set the tasks panel (#50) surfaces so a reshape can't
+        // let one silently fall through the `_` arm to `None`.
+        let events = [
+            Event::TaskStarted {
+                task: sample_task("t1"),
+            },
+            Event::TaskProgress {
                 id: "t1".to_string(),
                 progress_hint: None,
+            },
+            Event::TaskCompleted {
+                id: "t1".to_string(),
+                status: desktop_assistant_api_model::TaskStatus::Completed,
+                last_error: None,
+            },
+        ];
+        for event in events {
+            let label = format!("{event:?}");
+            assert!(
+                event_to_ui_message(event).is_some(),
+                "tasks-panel lifecycle event must map to a UiMessage: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsurfaced_event_maps_to_none() {
+        // `TaskLogAppended` has no web screen (the tasks panel shows status/
+        // progress, not per-task logs), so it still drops through the `_` arm to
+        // `None` — and the BFF relay likewise never ships log payloads.
+        assert!(
+            event_to_ui_message(Event::TaskLogAppended {
+                id: "t1".to_string(),
+                entry: desktop_assistant_api_model::TaskLogEntry {
+                    seq: 1,
+                    timestamp: 0,
+                    level: desktop_assistant_api_model::LogLevel::Info,
+                    category: desktop_assistant_api_model::LogCategory::Status,
+                    message: "hi".to_string(),
+                    data: None,
+                },
             })
             .is_none()
         );
