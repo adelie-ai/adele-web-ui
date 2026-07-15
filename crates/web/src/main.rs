@@ -29,6 +29,11 @@ mod transport;
 mod connections;
 #[cfg(any(target_arch = "wasm32", test))]
 mod context;
+// Conversation rename + archive/unarchive for the switcher (issue #49): the pure
+// decision logic (host-tested here) plus its `#[cfg(target_arch = "wasm32")]`
+// row-action / archived-section views over `sidebar`.
+#[cfg(any(target_arch = "wasm32", test))]
+mod conversation_manage;
 #[cfg(any(target_arch = "wasm32", test))]
 mod global_personality;
 #[cfg(any(target_arch = "wasm32", test))]

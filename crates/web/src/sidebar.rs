@@ -64,10 +64,10 @@ pub use view::conversation_sidebar;
 
 #[cfg(target_arch = "wasm32")]
 mod view {
-    use desktop_assistant_api_model::client::ConversationSummary;
     use leptos::prelude::*;
 
-    use super::{display_title, is_active, message_count_label};
+    use super::is_active;
+    use crate::conversation_manage::view::{archived_section, conversation_row};
     use crate::engine::ViewSignals;
     use crate::settings::EngineHandle;
 
@@ -81,18 +81,22 @@ mod view {
         view: ViewSignals,
         open: RwSignal<bool>,
     ) -> impl IntoView {
-        // Which row (if any) is awaiting a delete confirm, keyed by id so a
-        // repaint (list refresh / active-row change) can never confirm a row the
-        // user didn't point at.
+        // Which row (if any) is awaiting a delete confirm / is being renamed
+        // inline, each keyed by id so a repaint (list refresh / active-row
+        // change) can never confirm or edit a row the user didn't point at. The
+        // two are mutually exclusive (starting one clears the other).
         let pending_delete = RwSignal::new(None::<String>);
+        let renaming = RwSignal::new(None::<String>);
 
         let close = move |_| {
             pending_delete.set(None);
+            renaming.set(None);
             open.set(false);
         };
         let start_new = move |_| {
             engine.with_value(|e| e.borrow().new_conversation());
             pending_delete.set(None);
+            renaming.set(None);
             open.set(false);
         };
 
@@ -124,8 +128,13 @@ mod view {
                         </button>
 
                         <div class="conv-list" role="list">
-                            {move || conversation_rows(engine, view, open, pending_delete)}
+                            {move || conversation_rows(engine, view, open, pending_delete, renaming)}
                         </div>
+
+                        // Archived conversations (issue #49): collapsed by
+                        // default, fetched on demand, each unarchivable back into
+                        // the list above.
+                        {archived_section(engine)}
                     </div>
                 </div>
             </Show>
@@ -133,12 +142,15 @@ mod view {
     }
 
     /// The list body: one row per conversation, or an empty state. Re-runs when
-    /// the list, the open conversation, or the pending-delete row changes.
+    /// the list, the open conversation, or the pending-delete / renaming row
+    /// changes. The per-row rendering (including the rename editor + archive
+    /// action) lives in [`crate::conversation_manage::view::conversation_row`].
     fn conversation_rows(
         engine: EngineHandle,
         view: ViewSignals,
         open: RwSignal<bool>,
         pending_delete: RwSignal<Option<String>>,
+        renaming: RwSignal<Option<String>>,
     ) -> AnyView {
         let convs = view.conversations.get();
         if convs.is_empty() {
@@ -149,84 +161,26 @@ mod view {
         }
         let current = view.current_conversation_id.get();
         let confirming = pending_delete.get();
+        let editing = renaming.get();
         convs
             .into_iter()
             .map(|summary| {
                 let active = is_active(&summary, current.as_deref());
                 let is_confirming = confirming.as_deref() == Some(summary.id.as_str());
-                conversation_row(engine, open, pending_delete, summary, active, is_confirming)
+                let is_renaming = editing.as_deref() == Some(summary.id.as_str());
+                conversation_row(
+                    engine,
+                    open,
+                    pending_delete,
+                    renaming,
+                    summary,
+                    active,
+                    is_confirming,
+                    is_renaming,
+                )
             })
             .collect_view()
             .into_any()
-    }
-
-    /// A single conversation row — or, when this row is pending a delete, an
-    /// inline Cancel/Delete confirm in its place (so a destructive tap always
-    /// takes a deliberate second tap).
-    fn conversation_row(
-        engine: EngineHandle,
-        open: RwSignal<bool>,
-        pending_delete: RwSignal<Option<String>>,
-        summary: ConversationSummary,
-        active: bool,
-        is_confirming: bool,
-    ) -> AnyView {
-        let id = summary.id.clone();
-        let title = display_title(&summary).to_string();
-        let subtitle = message_count_label(summary.message_count);
-
-        if is_confirming {
-            let confirm_id = id.clone();
-            let do_delete = move |_| {
-                engine.with_value(|e| e.borrow().delete_conversation(confirm_id.clone()));
-                pending_delete.set(None);
-            };
-            let cancel = move |_| pending_delete.set(None);
-            return view! {
-                <div class="conv-confirm" role="listitem">
-                    <span class="conv-confirm-q">
-                        {format!("Delete \u{201c}{title}\u{201d}?")}
-                    </span>
-                    <div class="conv-confirm-actions">
-                        <button class="conv-btn" on:click=cancel>"Cancel"</button>
-                        <button class="conv-btn danger" on:click=do_delete>"Delete"</button>
-                    </div>
-                </div>
-            }
-            .into_any();
-        }
-
-        let select_id = id.clone();
-        let on_select = move |_| {
-            engine.with_value(|e| e.borrow().select_conversation(select_id.clone()));
-            open.set(false);
-        };
-        let ask_delete = move |ev: leptos::ev::MouseEvent| {
-            // Keep the tap off the row's select handler.
-            ev.stop_propagation();
-            pending_delete.set(Some(id.clone()));
-        };
-
-        view! {
-            <div class="conv-item" class:active=active role="listitem">
-                <button
-                    class="conv-row"
-                    aria-current=if active { "true" } else { "false" }
-                    on:click=on_select
-                >
-                    <span class="conv-title">{title}</span>
-                    <span class="conv-sub muted">{subtitle}</span>
-                </button>
-                <button
-                    class="icon-btn conv-del"
-                    aria-label="Delete conversation"
-                    on:click=ask_delete
-                >
-                    "\u{1f5d1}"
-                </button>
-            </div>
-        }
-        .into_any()
     }
 }
 
