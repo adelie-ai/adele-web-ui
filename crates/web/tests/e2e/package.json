@@ -14,6 +14,7 @@
     "test:knowledge": "node knowledge_panel.mjs",
     "test:knowledge-live": "node knowledge_live_refresh.mjs",
     "test:read-aloud": "node read_aloud.mjs",
+    "test:markdown": "node chat_markdown.mjs",
     "test:reauth": "node reauth_recovery.mjs",
     "test:nav-layout": "node settings_nav_layout.mjs",
     "test:bedrock-credentials": "node bedrock_credentials.mjs",

@@ -1301,3 +1301,155 @@ button {
     max-width: 260px;
   }
 }
+
+/* --- Chat markdown (issue #48) --------------------------------------------- */
+/* Message bodies are now sanitized markdown (`crate::markdown`), injected via
+   `inner_html` into `.msg-body`, replacing the old escaped `<p>{content}</p>`.
+   Styling is scoped under `.msg-body` and reuses the theme tokens, so it adapts
+   to light/dark and to both bubble backgrounds. Code backgrounds/link borders
+   mix `currentColor` so they read correctly on the light assistant bubble AND
+   the blue user bubble without per-role duplication. Mobile-first: wide content
+   (code blocks, tables) scrolls inside its OWN container — the page body never
+   scrolls sideways. */
+.msg-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Collapse the outer margins so a bubble hugs its content, but keep spacing
+   between block elements inside a multi-paragraph reply. */
+.msg-body > :first-child {
+  margin-top: 0;
+}
+.msg-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* Markdown paragraphs flow normally (a soft line-break is a space) — override
+   the plain-text `.msg p { white-space: pre-wrap }` above, which would turn
+   markdown soft breaks into hard line breaks. */
+.msg-body p {
+  margin: 0.5em 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.msg-body h1,
+.msg-body h2,
+.msg-body h3,
+.msg-body h4,
+.msg-body h5,
+.msg-body h6 {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.25;
+  font-weight: 650;
+}
+.msg-body h1 {
+  font-size: 1.35em;
+}
+.msg-body h2 {
+  font-size: 1.2em;
+}
+.msg-body h3 {
+  font-size: 1.08em;
+}
+.msg-body h4,
+.msg-body h5,
+.msg-body h6 {
+  font-size: 1em;
+}
+
+.msg-body ul,
+.msg-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.msg-body li {
+  margin: 0.15em 0;
+}
+
+.msg-body blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0 0.1em 0.75em;
+  border-left: 3px solid color-mix(in srgb, currentColor 35%, transparent);
+  color: color-mix(in srgb, currentColor 80%, transparent);
+}
+
+/* Monospace, readable on a phone. Inline code gets a subtle wash tinted from
+   the text colour so it works on either bubble. */
+.msg-body code {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo,
+    Consolas, monospace;
+  font-size: 0.9em;
+}
+.msg-body :not(pre) > code {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Fenced code blocks: their OWN horizontal-scroll container. `overflow-x: auto`
+   establishes a scroll context so a long unbreakable line scrolls inside the
+   block instead of widening the bubble or the page. `white-space: pre` keeps the
+   code unwrapped (so the scroll is meaningful). */
+.msg-body pre {
+  margin: 0.5em 0;
+  padding: 0.7em 0.85em;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  border-radius: 8px;
+}
+.msg-body pre code {
+  display: block;
+  white-space: pre;
+  background: none;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.45;
+}
+
+/* Tables also scroll in their own container rather than stretching the bubble. */
+.msg-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+.msg-body th,
+.msg-body td {
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+.msg-body th {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+/* Links: accent + underline on the neutral assistant bubble; on the coloured
+   user bubble fall back to the bubble's own text colour so they stay legible.
+   Both open in a new tab (set in the sanitizer) — 44px isn't meaningful for an
+   inline link, but the underline makes the tap target obvious. */
+.msg-body a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.msg.user .msg-body a {
+  color: var(--bubble-user-fg);
+}
+
+.msg-body img {
+  max-width: 100%;
+  height: auto;
+}
+
+.msg-body hr {
+  border: none;
+  border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  margin: 0.8em 0;
+}

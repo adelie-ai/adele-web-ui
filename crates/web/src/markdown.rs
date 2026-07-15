@@ -26,12 +26,77 @@
 //! "wasm32")]` [`view`] helpers own the Leptos glue that sets the sanitized
 //! HTML.
 
+use std::sync::LazyLock;
+
+use ammonia::Builder;
+use pulldown_cmark::{Options, Parser, html};
+
+/// The sanitizer, built once. Extends `ammonia`'s safe default (which already
+/// strips `<script>`, event handlers, `<iframe>`, and unsafe URL schemes, and
+/// rewrites link `rel` to `noopener noreferrer`) with `target="_blank"` forced
+/// onto every anchor: on a phone, a chat link must open a new tab rather than
+/// navigate the SPA away and drop the session. `rel` + `target` together are the
+/// safe external-link pattern (no reverse-tabnabbing).
+static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| {
+    let mut b = Builder::default();
+    b.set_tag_attribute_value("a", "target", "_blank");
+    b
+});
+
 /// Convert markdown `input` to sanitized HTML safe to inject via `inner_html`.
 ///
-/// STUB (spec commit): returns the input unchanged so the test suite fails until
-/// the real parse+sanitize pipeline lands.
+/// Parse GFM-flavoured markdown, render it to HTML, then sanitize. See the
+/// module docs for why sanitizing the rendered HTML (rather than filtering raw-
+/// HTML events mid-parse) is the correct order, and why the sanitized output is
+/// always well-formed even for a partial mid-stream buffer.
 pub fn markdown_to_html(input: &str) -> String {
-    input.to_string()
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let parser = Parser::new_ext(input, options);
+    let mut raw = String::new();
+    html::push_html(&mut raw, parser);
+
+    SANITIZER.clean(&raw).to_string()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use view::{message_body, streaming_body};
+
+#[cfg(target_arch = "wasm32")]
+mod view {
+    use leptos::prelude::*;
+
+    use super::markdown_to_html;
+
+    /// Render a *settled* message's markdown as sanitized HTML in a `.msg-body`
+    /// container. Computed once at build time — a finished message's content
+    /// doesn't change, so this needs no reactivity. The sanitized string is
+    /// injected via `inner_html`; it can never carry executable HTML (see
+    /// [`markdown_to_html`]).
+    ///
+    /// The returned view owns its sanitized `String` and borrows nothing from
+    /// `content` — `use<>` makes that explicit so the opaque type doesn't (under
+    /// Rust 2024's capture rules) tie itself to the caller's `&str` lifetime.
+    pub fn message_body(content: &str) -> impl IntoView + use<> {
+        view! { <div class="msg-body" inner_html=markdown_to_html(content)></div> }
+    }
+
+    /// Render the live streaming buffer reactively: each delta re-parses and
+    /// re-sanitizes the partial markdown, so formatting settles as text arrives
+    /// and the final render matches `message_body` once the reply completes. An
+    /// unterminated code fence mid-stream still yields well-formed HTML (ammonia
+    /// re-serializes), so a partial buffer can't break the page.
+    pub fn streaming_body(streaming: RwSignal<String>) -> impl IntoView {
+        view! {
+            <div
+                class="msg-body"
+                inner_html=move || markdown_to_html(&streaming.get())
+            ></div>
+        }
+    }
 }
 
 #[cfg(test)]
@@ -116,7 +181,10 @@ mod tests {
             "href: {html:?}"
         );
         assert!(html.contains(">the docs</a>"), "link text: {html:?}");
-        assert!(html.contains(r#"target="_blank""#), "target=_blank: {html:?}");
+        assert!(
+            html.contains(r#"target="_blank""#),
+            "target=_blank: {html:?}"
+        );
         assert!(html.contains("noopener"), "rel noopener: {html:?}");
         assert!(html.contains("noreferrer"), "rel noreferrer: {html:?}");
     }
@@ -128,7 +196,10 @@ mod tests {
         // A run pulldown-cmark treats as one HTML block; ammonia must strip the
         // <script> while keeping the adjacent legitimate text.
         let html = markdown_to_html("<script>alert(1)</script>hello");
-        assert!(html.contains("hello"), "text after script survives: {html:?}");
+        assert!(
+            html.contains("hello"),
+            "text after script survives: {html:?}"
+        );
         assert!(
             !html.to_ascii_lowercase().contains("<script"),
             "<script> stripped: {html:?}"
@@ -176,11 +247,17 @@ mod tests {
         );
         let lower = html.to_ascii_lowercase();
         for bad in ["<iframe", "onclick", "javascript:", "alert("] {
-            assert!(!lower.contains(bad), "hostile token {bad:?} present: {html:?}");
+            assert!(
+                !lower.contains(bad),
+                "hostile token {bad:?} present: {html:?}"
+            );
         }
         // The legitimate link survives (inert), href intact.
         assert!(html.contains("link"), "link text survives: {html:?}");
-        assert!(html.contains(r#"href="https://ok.example""#), "safe href: {html:?}");
+        assert!(
+            html.contains(r#"href="https://ok.example""#),
+            "safe href: {html:?}"
+        );
     }
 
     #[test]
@@ -195,8 +272,19 @@ mod tests {
         assert!(html.contains("Sure, here is a tip"), "leading text: {html}");
         assert!(html.contains("Bye!"), "trailing text: {html}");
         let lower = html.to_ascii_lowercase();
-        for bad in ["<script", "onerror", "onclick", "onload", "javascript:", "<iframe", "alert("] {
-            assert!(!lower.contains(bad), "hostile token {bad:?} present: {html}");
+        for bad in [
+            "<script",
+            "onerror",
+            "onclick",
+            "onload",
+            "javascript:",
+            "<iframe",
+            "alert(",
+        ] {
+            assert!(
+                !lower.contains(bad),
+                "hostile token {bad:?} present: {html}"
+            );
         }
     }
 
@@ -210,7 +298,10 @@ mod tests {
         let html = markdown_to_html("intro\n\n```rust\nfn main() {\n    let x = 1;");
         assert!(html.contains("<pre>"), "opens a <pre>: {html:?}");
         assert!(html.contains("</code></pre>"), "closes balanced: {html:?}");
-        assert!(html.contains("let x = 1;"), "partial code retained: {html:?}");
+        assert!(
+            html.contains("let x = 1;"),
+            "partial code retained: {html:?}"
+        );
     }
 
     #[test]
@@ -218,7 +309,10 @@ mod tests {
         // A half-typed `**bold` (no closing) must convert without panicking and
         // still surface the text.
         let html = markdown_to_html("this is **bold but unclosed");
-        assert!(html.contains("bold but unclosed"), "text retained: {html:?}");
+        assert!(
+            html.contains("bold but unclosed"),
+            "text retained: {html:?}"
+        );
     }
 
     #[test]

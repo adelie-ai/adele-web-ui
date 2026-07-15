@@ -268,3 +268,29 @@ panic.
 ```sh
 cd tests/e2e && npm run test:model-refresh
 ```
+
+## `chat_markdown.mjs`
+
+Coverage for chat markdown rendering (issue #48). The fake BFF acks a sent
+message and streams back one rich, partly-hostile markdown reply — a heading,
+bold + inline code, a bulleted list, a link, a very long fenced code line, and
+`<script>` + `<img onerror>` XSS attempts — in two deltas, the first ending on an
+**unterminated code fence**, then a completion. It asserts, in a real headless
+Chromium: (1) the settled reply renders as formatted HTML (`<h1>`, `<strong>`,
+`<ul>/<li>`, a safe `<a>` with `href` + `target=_blank` + `rel` noopener, and a
+`<pre>`) rather than the old escaped plain text; (2) the script/onerror attempts
+never execute (no `alert`, no injected flag) and leave no `<script>`/`onerror`
+token in the rendered bubble — `ammonia` stripped them before `inner_html`; (3)
+the code block scrolls horizontally in its own container (`pre.scrollWidth >
+clientWidth`) while the page body does **not** scroll sideways; and (4) streaming
+is graceful — the unterminated-fence partial renders a `<pre>` mid-stream without
+breaking the page and settles to the final render on completion. Also fails on
+any uncaught wasm panic.
+
+The pure md→sanitized-HTML core (formatting + the sanitizer) is unit-tested under
+`just check` in `src/markdown.rs`; this covers only the browser render +
+horizontal-scroll + no-execution layer those host tests can't reach.
+
+```sh
+cd tests/e2e && npm run test:markdown
+```
