@@ -47,8 +47,16 @@ spec:
               value: "http://localhost:9379,http://127.0.0.1:9379,https://adele-web-ui.example.com"
             # Browser front-door login (POST /login, HTTP Basic). Reuses the same
             # shared password Secret as the daemon for a single credential.
+            # Env-specific login username, sourced from a ConfigMap so it stays
+            # OUT of the repo and a `kubectl apply` can't revert it to a committed
+            # default. Create it once:
+            #   kubectl -n <ns> create configmap adele-web-ui-config \
+            #     --from-literal=login_username=<your-username>
             - name: ADELE_WEB_UI_LOGIN_USERNAME
-              value: "adele"
+              valueFrom:
+                configMapKeyRef:
+                  name: adele-web-ui-config
+                  key: login_username
             - name: ADELE_WEB_UI_LOGIN_PASSWORD
               valueFrom:
                 secretKeyRef:
