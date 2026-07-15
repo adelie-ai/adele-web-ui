@@ -377,6 +377,39 @@ pub fn credential_action(raw: &str, clear_requested: bool) -> Option<CredentialA
     }
 }
 
+/// Join Bedrock's three credential inputs into the daemon's
+/// `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]` string.
+///
+/// Each field is whitespace-trimmed (paste hygiene — none of the parts carries
+/// significant surrounding whitespace). Returns `None` unless *both* required
+/// parts (access key id + secret access key) are present, so a partial or
+/// all-blank entry is "no credential" rather than a malformed half-string. The
+/// optional session token is appended only when non-blank, so a two-part
+/// credential never carries a dangling trailing colon.
+pub fn join_bedrock_credential(
+    access_key_id: &str,
+    secret_access_key: &str,
+    session_token: &str,
+) -> Option<String> {
+    let _ = (access_key_id, secret_access_key, session_token);
+    todo!("spec: join Bedrock credential parts")
+}
+
+/// Decide the credential action for Bedrock's separate-fields form. An explicit
+/// clear wins over any typed text (mirrors [`credential_action`]); otherwise the
+/// three fields are joined via [`join_bedrock_credential`] — a complete pair
+/// becomes [`CredentialAction::Set`], anything short of it leaves the stored
+/// credential untouched (`None`).
+pub fn bedrock_credential_action(
+    access_key_id: &str,
+    secret_access_key: &str,
+    session_token: &str,
+    clear_requested: bool,
+) -> Option<CredentialAction> {
+    let _ = (access_key_id, secret_access_key, session_token, clear_requested);
+    todo!("spec: decide Bedrock credential action")
+}
+
 /// Build the [`Command::SetConnectionSecret`] for a credential action. A
 /// [`CredentialAction::Clear`] sends the empty string (the daemon's documented
 /// "clear" signal); the value is wrapped in [`Secret`] so it can't leak via
@@ -1040,6 +1073,85 @@ mod tests {
         // The write-only no-op: a blank field must never wipe a stored secret.
         assert_eq!(credential_action("", false), None);
         assert_eq!(credential_action("   \t ", false), None);
+    }
+
+    // --- join_bedrock_credential (item 2: separate Bedrock fields) ------------
+
+    #[test]
+    fn join_bedrock_two_parts_has_no_trailing_colon() {
+        // Access key id + secret, no session token: exactly `ACCESS:SECRET`.
+        assert_eq!(
+            join_bedrock_credential("AKIAEXAMPLE", "wJalr/secret", ""),
+            Some("AKIAEXAMPLE:wJalr/secret".to_string())
+        );
+    }
+
+    #[test]
+    fn join_bedrock_three_parts_appends_session_token() {
+        assert_eq!(
+            join_bedrock_credential("AKIAEXAMPLE", "wJalr/secret", "FwoGZXIvYXdz//SESSION"),
+            Some("AKIAEXAMPLE:wJalr/secret:FwoGZXIvYXdz//SESSION".to_string())
+        );
+    }
+
+    #[test]
+    fn join_bedrock_trims_each_field() {
+        // Surrounding whitespace (e.g. a pasted key with a trailing newline) is
+        // stripped from every part before joining.
+        assert_eq!(
+            join_bedrock_credential("  AKIAEXAMPLE\n", "\twJalr/secret ", "  TOKEN\n"),
+            Some("AKIAEXAMPLE:wJalr/secret:TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn join_bedrock_all_blank_is_none() {
+        assert_eq!(join_bedrock_credential("", "", ""), None);
+        assert_eq!(join_bedrock_credential("  ", "\t", " \n "), None);
+    }
+
+    #[test]
+    fn join_bedrock_requires_both_access_and_secret() {
+        // A partial entry (only one of the required pair) is "no credential",
+        // never a malformed half-string like `AKIA:` or `:secret`.
+        assert_eq!(join_bedrock_credential("AKIAEXAMPLE", "", ""), None);
+        assert_eq!(join_bedrock_credential("", "wJalr/secret", ""), None);
+        // A session token alone can never stand in for the required pair.
+        assert_eq!(join_bedrock_credential("", "", "TOKEN"), None);
+    }
+
+    #[test]
+    fn join_bedrock_blank_session_is_dropped() {
+        // Whitespace-only session token collapses to the two-part form.
+        assert_eq!(
+            join_bedrock_credential("AKIAEXAMPLE", "wJalr/secret", "   "),
+            Some("AKIAEXAMPLE:wJalr/secret".to_string())
+        );
+    }
+
+    // --- bedrock_credential_action --------------------------------------------
+
+    #[test]
+    fn bedrock_credential_action_sets_joined_value() {
+        assert_eq!(
+            bedrock_credential_action("AKIAEXAMPLE", "wJalr/secret", "", false),
+            Some(CredentialAction::Set("AKIAEXAMPLE:wJalr/secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn bedrock_credential_action_clear_wins_over_typed_fields() {
+        // An explicit clear removes the secret even with stray field text.
+        assert_eq!(
+            bedrock_credential_action("AKIAEXAMPLE", "wJalr/secret", "TOKEN", true),
+            Some(CredentialAction::Clear)
+        );
+    }
+
+    #[test]
+    fn bedrock_credential_action_blank_no_clear_is_none() {
+        // The write-only no-op: blank fields must never wipe a stored secret.
+        assert_eq!(bedrock_credential_action("", "", "", false), None);
     }
 
     // --- secret_command (wire shape + redaction) ------------------------------
