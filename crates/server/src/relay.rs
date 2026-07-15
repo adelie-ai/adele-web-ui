@@ -42,6 +42,15 @@
 //! regardless of what it's viewing needs the user-level event seam and rides the
 //! same multi-tenant identity work (#20/#33).
 //!
+//! ## User-scoped events (#39)
+//! `KnowledgeChanged` is not about any one conversation — the user's long-term
+//! knowledge base changed — so there is no conversation to `route` on. It is
+//! delivered by `ConversationSubscriptions::broadcast_to_user` to ALL of the
+//! single-tenant user's sessions (whatever each is viewing), so an open KB panel
+//! live-refreshes. This is the SAME single-tenant posture as the rest of the
+//! relay: it broadcasts to the one user, and true per-user demux awaits
+//! multi-tenancy (#20). The #432 user boundary is still enforced end to end.
+//!
 //! ## Trust boundary
 //! The relay forwards only the daemon's own `api::Event`s (never daemon internals
 //! or secrets), and route()'s per-user scope (#432) is preserved end to end — a
@@ -73,9 +82,10 @@ const RELAY_ORIGIN_SESSION: &str = "__bff_relay__";
 /// reducer routes a not-initiated turn by that stable id).
 ///
 /// Returns `None` for signals the web UI does not surface — background `Task*`
-/// (no process-manager panel), `KnowledgeChanged` (no KB panel; also carries no
-/// conversation to route on), and `ClientToolCall` (the web client is not an MCP
-/// host) — and for the `Disconnected` control signal.
+/// (no process-manager panel) and `ClientToolCall` (the web client is not an MCP
+/// host) — and for the `Disconnected` control signal. `KnowledgeChanged` DOES
+/// map (#39); it carries no conversation, so [`relay_signal`] broadcasts it
+/// user-scoped rather than routing by conversation.
 pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
     match signal {
         SignalEvent::UserMessageAdded {
@@ -158,13 +168,16 @@ pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
         SignalEvent::ScratchpadChanged { conversation_id } => Some(api::Event::ScratchpadChanged {
             conversation_id: conversation_id.clone(),
         }),
-        // Not surfaced by the web UI (no process-manager / KB panel, not an MCP
-        // host), and `Disconnected` is a control signal handled by the loop.
+        // User-scoped (#39): the user's long-term KB changed. It carries no
+        // conversation, so `relay_signal` broadcasts it to all of the user's
+        // sessions rather than routing by conversation.
+        SignalEvent::KnowledgeChanged => Some(api::Event::KnowledgeChanged),
+        // Not surfaced by the web UI (no process-manager panel, not an MCP host),
+        // and `Disconnected` is a control signal handled by the loop.
         SignalEvent::TaskStarted { .. }
         | SignalEvent::TaskProgress { .. }
         | SignalEvent::TaskLogAppended { .. }
         | SignalEvent::TaskCompleted { .. }
-        | SignalEvent::KnowledgeChanged
         | SignalEvent::ClientToolCall { .. }
         | SignalEvent::Disconnected { .. } => None,
     }
@@ -205,12 +218,19 @@ fn event_conversation_id(event: &api::Event) -> Option<&str> {
     }
 }
 
-/// Relay one daemon signal to the browser sessions viewing its conversation.
+/// Relay one daemon signal to the browser sessions that should see it.
 ///
-/// Returns `true` when the signal mapped to a relayable event and was routed,
-/// `false` when it was dropped (not surfaced by the web UI, or carried no
-/// conversation to route on). Never panics on any variant — a `Disconnected`
-/// simply maps to `None` and is dropped here (the loop in [`run_relay`] logs it).
+/// A conversation-scoped event is routed to the sessions viewing its
+/// conversation; a **user-scoped** event (one that maps but carries no
+/// conversation — `KnowledgeChanged`, #39) is broadcast to ALL of the
+/// (single-tenant) user's sessions, whatever each is viewing, so an open KB
+/// panel live-refreshes. Both paths honour route()/broadcast()'s #432 user
+/// boundary — a session is never delivered another user's event.
+///
+/// Returns `true` when the signal mapped to a relayable event and was delivered,
+/// `false` when it was dropped (not surfaced by the web UI). Never panics on any
+/// variant — a `Disconnected` simply maps to `None` and is dropped here (the
+/// loop in [`run_relay`] logs it).
 async fn relay_signal(
     signal: &SignalEvent,
     subs: &ConversationSubscriptions,
@@ -219,11 +239,15 @@ async fn relay_signal(
     let Some(event) = relay_signal_to_event(signal) else {
         return false;
     };
-    let Some(conversation_id) = event_conversation_id(&event) else {
-        return false;
-    };
-    subs.route(conversation_id, &event, RELAY_ORIGIN_SESSION, origin_user)
-        .await;
+    match event_conversation_id(&event) {
+        Some(conversation_id) => {
+            subs.route(conversation_id, &event, RELAY_ORIGIN_SESSION, origin_user)
+                .await;
+        }
+        // No conversation to route on ⇒ user-scoped (the only such relayed event
+        // is `KnowledgeChanged`). Fan it to every one of the user's sessions.
+        None => subs.broadcast_to_user(&event, origin_user).await,
+    }
     true
 }
 
@@ -435,11 +459,20 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_changed_maps_to_knowledge_event() {
+        // Issue #39: the user's long-term KB changed. Unlike the conversation-
+        // scoped events, this maps to a wire event that carries no conversation
+        // (it is user-scoped), so `relay_signal` fans it out differently.
+        let ev = relay_signal_to_event(&SignalEvent::KnowledgeChanged).expect("relayed");
+        assert!(matches!(ev, api::Event::KnowledgeChanged));
+    }
+
+    #[test]
     fn background_and_control_signals_are_not_relayed() {
-        // The web UI has no process-manager or KB panel, is not an MCP host, and
+        // The web UI has no process-manager panel, is not an MCP host, and
         // `Disconnected` is a control signal — none map to a relayable event.
+        // (`KnowledgeChanged` IS relayed now, user-scoped — see its own tests.)
         for signal in [
-            SignalEvent::KnowledgeChanged,
             SignalEvent::TaskProgress {
                 id: "t1".into(),
                 progress_hint: None,
@@ -465,9 +498,11 @@ mod tests {
 
     #[test]
     fn every_relayed_event_has_a_conversation_to_route_on() {
-        // The routing invariant: anything `relay_signal_to_event` emits MUST have
-        // a conversation id, or `relay_signal` would silently drop it. Pin the
-        // whole relayed set so a new relayed variant can't forget to add one.
+        // The routing invariant for CONVERSATION-scoped events: each MUST carry a
+        // conversation id so `relay_signal` routes rather than drops it. Pin the
+        // whole conversation-scoped set so a new such variant can't forget one.
+        // (The one user-scoped exception, `KnowledgeChanged`, deliberately has no
+        // conversation and is broadcast instead — see its own tests.)
         let relayed = [
             SignalEvent::UserMessageAdded {
                 conversation_id: "c1".into(),
@@ -604,6 +639,50 @@ mod tests {
         assert!(
             matches!(got.as_slice(), [api::Event::ScratchpadChanged { conversation_id }] if conversation_id == "c1"),
             "the scratchpad-change must reach the viewing session, got {got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_changed_is_broadcast_to_the_user_regardless_of_subscription() {
+        // Issue #39: `KnowledgeChanged` is user-scoped — it carries no
+        // conversation to route on. It must reach EVERY one of the user's
+        // sessions whatever each is viewing, so an open KB panel live-refreshes.
+        // Here two sessions view *different* conversations (and a third views
+        // none); all three must still receive it.
+        let subs = ConversationSubscriptions::new();
+        let a = viewer(&subs, "sess-1", USER, &["c1"]);
+        let b = viewer(&subs, "sess-2", USER, &["c2"]);
+        let c = viewer(&subs, "sess-3", USER, &[]); // subscribed to nothing
+
+        assert!(
+            relay_signal(&SignalEvent::KnowledgeChanged, &subs, USER).await,
+            "KnowledgeChanged must be relayed (routed), not dropped"
+        );
+
+        for (name, sink) in [("A", &a), ("B", &b), ("C", &c)] {
+            let got = sink.0.lock().unwrap();
+            assert!(
+                matches!(got.as_slice(), [api::Event::KnowledgeChanged]),
+                "session {name} must receive the user-scoped KnowledgeChanged, got {got:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn knowledge_changed_broadcast_does_not_cross_the_user_boundary() {
+        // Trust boundary (#432): a DIFFERENT user's session — even subscribed to
+        // the same conversation ids — is never delivered the broadcast.
+        let subs = ConversationSubscriptions::new();
+        let intruder = viewer(&subs, "sess-evil", OTHER_USER, &["c1"]);
+
+        assert!(
+            relay_signal(&SignalEvent::KnowledgeChanged, &subs, USER).await,
+            "routed"
+        );
+
+        assert!(
+            intruder.0.lock().unwrap().is_empty(),
+            "another user's session must never receive the KB broadcast"
         );
     }
 

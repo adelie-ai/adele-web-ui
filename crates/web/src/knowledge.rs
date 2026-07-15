@@ -14,9 +14,15 @@
 //! doesn't model KB state, so — like the connections/purposes/personality panels
 //! — the engine loads results straight into view signals (`refresh_knowledge` /
 //! `search_knowledge`) rather than routing through `UiMessage`s. A Refresh button
-//! re-reads on demand. (Live push via `KnowledgeChanged` is *not* wired: the BFF
-//! relay currently drops that background signal, and it carries no conversation
-//! to route on — see the PR's deferred-scope note.)
+//! re-reads on demand.
+//!
+//! **Live refresh (issue #39).** When the KB changes under us (a dream-cycle
+//! pass or an assistant write), the daemon emits a user-scoped `KnowledgeChanged`
+//! that the BFF relay broadcasts to the browser; the engine bumps
+//! `ViewSignals::knowledge_epoch`. While this panel is open it watches that epoch
+//! and re-runs its current view (browse or the active search), so it auto-updates
+//! with no manual poke. A closed panel has no such watcher, so the bump is a
+//! no-op then (no needless refetch).
 //!
 //! **Split like `scratchpad.rs`/`model.rs`.** The pure summary/snippet/date
 //! helpers live at module top and unit-test on the host target; the Leptos panel
@@ -148,6 +154,27 @@ mod ui {
         // signal writes don't happen during render.
         Effect::new(move |_| {
             engine.with_value(|e| e.borrow().refresh_knowledge());
+        });
+
+        // Live refresh (issue #39): when the daemon relays a `KnowledgeChanged`
+        // (the KB changed under us — a dream-cycle pass or an assistant write),
+        // the engine bumps `knowledge_epoch`. Re-run the CURRENT view (the active
+        // search, else browse) so the panel reflects the change with no manual
+        // poke. This Effect exists only while the panel is mounted (open), so a
+        // closed panel never re-fetches — the epoch still bumps, but nothing here
+        // watches it. The initial dependency-tracking run is skipped (`prev` is
+        // `None` then): the mount effect above already did the first load.
+        Effect::new(move |prev: Option<u64>| {
+            let epoch = view.knowledge_epoch.get();
+            if prev.is_some() {
+                match normalize_query(&query.get_untracked()) {
+                    Some(q) if searching.get_untracked() => {
+                        engine.with_value(|e| e.borrow().search_knowledge(q));
+                    }
+                    _ => engine.with_value(|e| e.borrow().refresh_knowledge()),
+                }
+            }
+            epoch
         });
 
         let submit = move |ev: leptos::ev::SubmitEvent| {

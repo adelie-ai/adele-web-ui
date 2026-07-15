@@ -14,9 +14,9 @@ use desktop_assistant_api_model::Event;
 /// Map a wire [`Event`] onto the shared reducer's [`UiMessage`].
 ///
 /// Returns `None` for events the SPA does not surface yet — background tasks,
-/// scratchpad/knowledge sync, client-tool calls, and config pushes — so the
-/// caller can drop them. These gain arms as their screens land (each has a
-/// ready `UiMessage` counterpart in `client-ui-common`).
+/// client-tool calls, and config pushes — so the caller can drop them. These
+/// gain arms as their screens land (each has a ready `UiMessage` counterpart in
+/// `client-ui-common`).
 pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
     let msg = match event {
         Event::UserMessageAdded {
@@ -97,6 +97,13 @@ pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
         Event::ScratchpadChanged { conversation_id } => {
             UiMessage::ScratchpadChanged { conversation_id }
         }
+        // The user's long-term knowledge base changed (issue #39): a dream-cycle
+        // pass or the assistant wrote/edited an entry. The reducer returns no
+        // effect for this (the KB browser is a self-contained widget), so the
+        // engine bumps a knowledge epoch the open panel watches to re-fetch.
+        // Mapping it — rather than dropping it via the `_` arm — is what lets the
+        // panel live-update; the BFF relay broadcasts it user-scoped.
+        Event::KnowledgeChanged => UiMessage::KnowledgeChanged,
         _ => return None,
     };
     Some(msg)
@@ -357,11 +364,29 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_changed_maps_through() {
+        // Issue #39: the KB browser live-refreshes on this. The reducer returns
+        // no effects for it (the KB panel is a self-contained widget wired at the
+        // window layer), but it must still map to the `UiMessage` rather than
+        // being dropped by the `_` arm — dropping it is what kept the panel from
+        // live-updating.
+        assert!(matches!(
+            event_to_ui_message(Event::KnowledgeChanged),
+            Some(UiMessage::KnowledgeChanged)
+        ));
+    }
+
+    #[test]
     fn unsurfaced_event_maps_to_none() {
-        // No KB screen in the foundation yet, so `KnowledgeChanged` is dropped by
-        // the `_` arm rather than mapped (it has a ready UiMessage counterpart for
-        // when the panel lands).
-        assert!(event_to_ui_message(Event::KnowledgeChanged).is_none());
+        // Background `Task*` events have no web screen (no process manager), so
+        // they still drop through the `_` arm to `None`.
+        assert!(
+            event_to_ui_message(Event::TaskProgress {
+                id: "t1".to_string(),
+                progress_hint: None,
+            })
+            .is_none()
+        );
     }
 
     #[test]
