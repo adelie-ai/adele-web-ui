@@ -181,3 +181,35 @@ The pure decision core (enable / dedup / blank-skip / cancel) is unit-tested und
 ```sh
 cd tests/e2e && npm run test:read-aloud
 ```
+
+## `reauth_recovery.mjs`
+
+Regression for graceful recovery from a rejected/expired session token (issue
+#42). Before the fix the SPA held an invalid token and **retry-spammed** the
+`/ws` upgrade forever ("WebSocket is already in CLOSING or CLOSED state",
+"transport closed before reply") instead of recovering. It drives the built SPA
+against three fake BFFs and asserts, in the DOM + storage + a console spy:
+
+1. **Expired token** (seeded into `localStorage` via `page.addInitScript`, with an
+   `exp` in the past): the app opens straight on the **login screen** (the
+   pre-emptive `exp` check, never attempting a connect), the dead token is
+   **cleared** from storage, and **no** CLOSING/CLOSED warning is logged. Logging
+   in then connects and comes **online**.
+2. **Rejected but un-expired token**: the fake BFF **refuses every `/ws` upgrade**
+   (401, never opens) while the token's `exp` is still in the future. After a few
+   fast failures the app drops to **login** and **stops retrying** — the harness
+   counts `/ws` upgrade attempts and asserts they are bounded (≈3) and do not keep
+   climbing — with the token cleared and **no** CLOSING/CLOSED spam.
+3. **Healthy mid-session drop**: the BFF accepts, serves the initial load (the SPA
+   goes online), then **drops the socket once**; the app **reconnects** (≥2
+   connections observed) and stays in chat — it never drops to login, so the
+   phone-sleep / network-change reconnect path is unregressed.
+
+The pure logic it exercises — JWT `exp` classification and the reconnect /
+auth-bail policy — is unit-tested under `just check` in `src/reauth.rs`; this
+covers only the real-browser socket/storage/console behaviour those host tests
+can't reach. Fails on any uncaught wasm panic.
+
+```sh
+cd tests/e2e && npm run test:reauth
+```

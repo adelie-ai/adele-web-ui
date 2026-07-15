@@ -12,7 +12,8 @@
     "test:live-sync": "node live_multi_client_sync.mjs",
     "test:scratchpad": "node scratchpad_view.mjs",
     "test:knowledge": "node knowledge_panel.mjs",
-    "test:read-aloud": "node read_aloud.mjs"
+    "test:read-aloud": "node read_aloud.mjs",
+    "test:reauth": "node reauth_recovery.mjs"
   },
   "dependencies": {
     "playwright": "^1.48.0",
