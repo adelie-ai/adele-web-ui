@@ -294,3 +294,30 @@ horizontal-scroll + no-execution layer those host tests can't reach.
 ```sh
 cd tests/e2e && npm run test:markdown
 ```
+
+## `chat_markdown_xss.mjs`
+
+Adversarial XSS gauntlet for chat markdown (issue #48) — the companion to
+`chat_markdown.mjs`, which proves formatting + a representative attempt. This one
+streams a **broad battery of hostile constructs, each in its own assistant turn**
+(a fresh top-level parse — the strongest adversarial context, and it stops one
+payload's unclosed tag from swallowing the next) and asserts, in real headless
+Chromium, that after **every** turn nothing executed (`window.__pwned` never set,
+`alert` never fired, no native dialog, no wasm error) and the rendered bubble
+contains no dangerous token (`<script>`/`<iframe>`/`<svg>`/`<math>`/`<style>`/
+`<base>`/`<form>`/`<object>`/`<embed>`), no `on*` handler, no dangerous element,
+and no `javascript:` / `data:text/html` href — with the forced `target="_blank"`
+never overridable to `_self`. A stripped-to-empty bubble is a pass (the payload
+was correctly removed). The battery covers the ways sanitizers usually break:
+foreign-content namespace-confusion mXSS (`<svg>`/`<math>` + `<style>` breakout),
+entity/whitespace/`&colon;`-obfuscated `javascript:` in markdown links and raw
+anchors, `data:text/html` in href + img src, SVG `onload` + inline
+`<svg><script>`, `<iframe>`/`<form action=js>`/`formaction`/`<base href=js>`/
+`<style>@import js`, tag-splitting (`<scr<script>ipt>`), and handlers on an
+allowed tag. The pure sanitizer core is unit-tested under `just check` in
+`src/markdown.rs`; this covers the browser no-execution + no-surviving-token
+layer those host tests can't reach.
+
+```sh
+cd tests/e2e && npm run test:markdown-xss
+```
