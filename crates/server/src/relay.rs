@@ -435,11 +435,20 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_changed_maps_to_knowledge_event() {
+        // Issue #39: the user's long-term KB changed. Unlike the conversation-
+        // scoped events, this maps to a wire event that carries no conversation
+        // (it is user-scoped), so `relay_signal` fans it out differently.
+        let ev = relay_signal_to_event(&SignalEvent::KnowledgeChanged).expect("relayed");
+        assert!(matches!(ev, api::Event::KnowledgeChanged));
+    }
+
+    #[test]
     fn background_and_control_signals_are_not_relayed() {
-        // The web UI has no process-manager or KB panel, is not an MCP host, and
+        // The web UI has no process-manager panel, is not an MCP host, and
         // `Disconnected` is a control signal — none map to a relayable event.
+        // (`KnowledgeChanged` IS relayed now, user-scoped — see its own tests.)
         for signal in [
-            SignalEvent::KnowledgeChanged,
             SignalEvent::TaskProgress {
                 id: "t1".into(),
                 progress_hint: None,
@@ -604,6 +613,47 @@ mod tests {
         assert!(
             matches!(got.as_slice(), [api::Event::ScratchpadChanged { conversation_id }] if conversation_id == "c1"),
             "the scratchpad-change must reach the viewing session, got {got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_changed_is_broadcast_to_the_user_regardless_of_subscription() {
+        // Issue #39: `KnowledgeChanged` is user-scoped — it carries no
+        // conversation to route on. It must reach EVERY one of the user's
+        // sessions whatever each is viewing, so an open KB panel live-refreshes.
+        // Here two sessions view *different* conversations (and a third views
+        // none); all three must still receive it.
+        let subs = ConversationSubscriptions::new();
+        let a = viewer(&subs, "sess-1", USER, &["c1"]);
+        let b = viewer(&subs, "sess-2", USER, &["c2"]);
+        let c = viewer(&subs, "sess-3", USER, &[]); // subscribed to nothing
+
+        assert!(
+            relay_signal(&SignalEvent::KnowledgeChanged, &subs, USER).await,
+            "KnowledgeChanged must be relayed (routed), not dropped"
+        );
+
+        for (name, sink) in [("A", &a), ("B", &b), ("C", &c)] {
+            let got = sink.0.lock().unwrap();
+            assert!(
+                matches!(got.as_slice(), [api::Event::KnowledgeChanged]),
+                "session {name} must receive the user-scoped KnowledgeChanged, got {got:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn knowledge_changed_broadcast_does_not_cross_the_user_boundary() {
+        // Trust boundary (#432): a DIFFERENT user's session — even subscribed to
+        // the same conversation ids — is never delivered the broadcast.
+        let subs = ConversationSubscriptions::new();
+        let intruder = viewer(&subs, "sess-evil", OTHER_USER, &["c1"]);
+
+        assert!(relay_signal(&SignalEvent::KnowledgeChanged, &subs, USER).await, "routed");
+
+        assert!(
+            intruder.0.lock().unwrap().is_empty(),
+            "another user's session must never receive the KB broadcast"
         );
     }
 

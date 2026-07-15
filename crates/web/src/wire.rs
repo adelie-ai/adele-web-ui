@@ -357,11 +357,29 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_changed_maps_through() {
+        // Issue #39: the KB browser live-refreshes on this. The reducer returns
+        // no effects for it (the KB panel is a self-contained widget wired at the
+        // window layer), but it must still map to the `UiMessage` rather than
+        // being dropped by the `_` arm — dropping it is what kept the panel from
+        // live-updating.
+        assert!(matches!(
+            event_to_ui_message(Event::KnowledgeChanged),
+            Some(UiMessage::KnowledgeChanged)
+        ));
+    }
+
+    #[test]
     fn unsurfaced_event_maps_to_none() {
-        // No KB screen in the foundation yet, so `KnowledgeChanged` is dropped by
-        // the `_` arm rather than mapped (it has a ready UiMessage counterpart for
-        // when the panel lands).
-        assert!(event_to_ui_message(Event::KnowledgeChanged).is_none());
+        // Background `Task*` events have no web screen (no process manager), so
+        // they still drop through the `_` arm to `None`.
+        assert!(
+            event_to_ui_message(Event::TaskProgress {
+                id: "t1".to_string(),
+                progress_hint: None,
+            })
+            .is_none()
+        );
     }
 
     #[test]
