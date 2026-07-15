@@ -43,6 +43,12 @@ mod knowledge;
 // view sub-module sets the sanitized HTML in the Leptos chat bubbles.
 #[cfg(any(target_arch = "wasm32", test))]
 mod markdown;
+// MCP-servers settings panel (issue #55): the pure `config_json` DTO mapping,
+// status/transport display vocabulary, and env/args/scope parsers are
+// host-tested here; a `#[cfg(target_arch = "wasm32")]` Leptos view renders the
+// engine's `mcp_servers` signal. Pure additive client panel — no BFF change.
+#[cfg(any(target_arch = "wasm32", test))]
+mod mcp;
 #[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]

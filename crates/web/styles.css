@@ -1112,6 +1112,259 @@ button {
   flex: 1;
 }
 
+/* --- MCP-servers panel ----------------------------------------------------- */
+.mcp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mcp-list > .panel-note {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+/* A server card: a stacked layout (status head, sub, target, actions) so long
+   URLs/commands wrap instead of squeezing the actions off a phone screen. */
+.mcp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.mcp-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.mcp-dot.ok {
+  background: var(--ok);
+}
+
+.mcp-dot.warn {
+  background: var(--warn);
+}
+
+.mcp-dot.error {
+  background: var(--danger);
+}
+
+.mcp-dot.neutral {
+  background: var(--muted);
+}
+
+.mcp-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Transport pill (remote / local). */
+.mcp-chip {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.mcp-card-sub,
+.mcp-target {
+  font-size: 12px;
+}
+
+.mcp-target {
+  overflow-wrap: anywhere;
+}
+
+/* Last connect error — surfaced honestly, in the danger colour. */
+.mcp-detail {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.mcp-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+/* The honest OAuth "sign in from the desktop" note. */
+.mcp-note.warn {
+  color: var(--warn);
+}
+
+.mcp-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* Buttons shared across the list, confirm, and form. */
+.mcp-btn {
+  min-height: 44px;
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.mcp-btn:active {
+  background: var(--bubble-assistant);
+}
+
+.mcp-btn.primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.mcp-btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.mcp-btn:disabled {
+  opacity: 0.6;
+}
+
+.mcp-add {
+  margin-top: 6px;
+  width: 100%;
+}
+
+.mcp-error {
+  margin: 4px 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: 10px;
+}
+
+/* Inline remove confirmation. */
+.mcp-confirm {
+  padding: 12px;
+  background: var(--bubble-assistant);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: 12px;
+}
+
+.mcp-confirm-q {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+/* --- MCP-server form ------------------------------------------------------- */
+.mcp-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.mcp-form-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mcp-form-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.mcp-input {
+  width: 100%;
+  padding: 12px 14px;
+  font-size: 16px; /* >=16px: stops iOS Safari zoom-on-focus */
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.mcp-input:disabled {
+  color: var(--muted);
+  background: var(--bubble-assistant);
+}
+
+.mcp-textarea {
+  min-height: 76px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.mcp-cred {
+  padding: 12px;
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.mcp-cred .mcp-input {
+  background: var(--bg);
+}
+
+.mcp-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  font-size: 14px;
+}
+
+.mcp-check input {
+  width: 20px;
+  height: 20px;
+}
+
+.mcp-locked {
+  margin: 0;
+  padding: 10px 12px;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.mcp-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.mcp-form-actions .mcp-btn {
+  flex: 1;
+}
+
 /* --- Purposes panel -------------------------------------------------------- */
 /* One stacked card per purpose. Native <select>s give touch-friendly pickers on
    phones; the effort control reuses the shared segmented control. */
