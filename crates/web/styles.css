@@ -926,6 +926,15 @@ button {
   background: var(--bg);
 }
 
+/* Bedrock's separate credential inputs stack vertically inside the card. */
+.conn-cred-field {
+  margin-top: 10px;
+}
+
+.conn-cred-field .sub-label {
+  margin-bottom: 6px;
+}
+
 .conn-note {
   margin: 6px 0 0;
   font-size: 12px;
