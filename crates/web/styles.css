@@ -386,6 +386,7 @@ button {
 
 .sheet-header {
   display: flex;
+  flex: none; /* stay fixed; only .sheet-body scrolls */
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px 8px 16px;
@@ -397,9 +398,15 @@ button {
   font-weight: 600;
 }
 
+/* The section nav strip. It must stay fully visible and never be squeezed by a
+   long panel body: `flex: none` + a min-height keep it at full size while
+   `.sheet-body` (below) is the sole vertical scroll container. It still scrolls
+   horizontally when the tabs overflow the width. */
 .sheet-tabs {
   display: flex;
+  flex: none;
   gap: 6px;
+  min-height: 52px; /* 44px tab + the strip's bottom padding */
   padding: 0 12px 8px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
@@ -430,8 +437,12 @@ button {
   font-size: 15px;
 }
 
+/* The scroll container. `min-height: 0` lets this flex child shrink below its
+   content's intrinsic height so it — not the whole sheet — scrolls, which is
+   what keeps the grabber/header/nav/footer pinned around it. */
 .sheet-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding: 16px;
@@ -439,6 +450,7 @@ button {
 
 .sheet-footer {
   display: flex;
+  flex: none; /* stay pinned at the bottom; only .sheet-body scrolls */
   justify-content: flex-end;
   padding: 8px 12px;
   border-top: 1px solid var(--border);
