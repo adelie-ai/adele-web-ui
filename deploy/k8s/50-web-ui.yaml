@@ -66,6 +66,21 @@ spec:
                 secretKeyRef:
                   name: adele-secrets
                   key: WS_LOGIN_PASSWORD
+            # Stable HS256 signing key for the browser session tokens the BFF
+            # mints, from a Secret — so a redeploy does NOT invalidate everyone's
+            # login. (Without this, the key regenerates on the per-pod emptyDir
+            # every deploy, stranding the SPA on an invalid token.) Create once:
+            #   kubectl -n <ns> create secret generic adele-web-ui-jwt \
+            #     --from-literal=ws_jwt_hs256_signing_key="$(openssl rand -hex 32)"
+            - name: ADELE_WEB_UI_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: adele-web-ui-jwt
+                  key: ws_jwt_hs256_signing_key
+            # Browser token lifetime — 7 days. 15 min was too short and stranded
+            # the SPA on expiry (it doesn't yet re-auth on 401 — tracked follow-up).
+            - name: ADELE_WEB_UI_TOKEN_TTL_SECS
+              value: "604800"
           volumeMounts:
             # Per-pod HS256 signing key for browser session tokens lives under
             # $XDG_DATA_HOME (/home/appuser/.local/share). An emptyDir keeps the

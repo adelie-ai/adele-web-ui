@@ -12,8 +12,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use desktop_assistant_auth_jwt::{Claims, UserId, decode, encode};
 use desktop_assistant_ws::{WsAuthValidator, WsLoginService};
 
-/// Browser session-token lifetime.
-const TOKEN_TTL_SECS: u64 = 15 * 60;
+/// Default browser session-token lifetime — 7 days. A 15-minute TTL combined
+/// with a signing key that regenerates on every k8s deploy stranded the SPA on
+/// an invalid token (it kept retry-spamming the `/ws` upgrade). 7 days is a sane
+/// lifetime for a single-user tailnet service; override via
+/// `ADELE_WEB_UI_TOKEN_TTL_SECS`.
+pub const DEFAULT_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -62,6 +66,7 @@ pub struct PasswordLogin {
     signing_key: String,
     issuer: String,
     audience: String,
+    token_ttl_secs: u64,
 }
 
 impl PasswordLogin {
@@ -71,6 +76,7 @@ impl PasswordLogin {
         signing_key: String,
         issuer: String,
         audience: String,
+        token_ttl_secs: u64,
     ) -> Self {
         Self {
             username,
@@ -78,6 +84,7 @@ impl PasswordLogin {
             signing_key,
             issuer,
             audience,
+            token_ttl_secs,
         }
     }
 }
@@ -96,7 +103,7 @@ impl WsLoginService for PasswordLogin {
             iss: self.issuer.clone(),
             sub: subject.to_string(),
             aud: self.audience.clone(),
-            exp: iat + TOKEN_TTL_SECS,
+            exp: iat + self.token_ttl_secs,
             iat,
             nbf: iat,
             jti: uuid::Uuid::new_v4().simple().to_string(),
