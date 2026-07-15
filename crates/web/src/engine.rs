@@ -36,6 +36,11 @@ use crate::transport::Transport;
 /// (`Rc<dyn Fn>` because the engine is `!Send` and single-threaded).
 pub type ActionDone = Rc<dyn Fn(Result<(), String>)>;
 
+/// A one-shot completion callback for a per-connection model refresh: invoked
+/// with `Ok(count)` — the number of models the connection now offers — or
+/// `Err(reason)`. The connections panel renders it as an inline result line.
+pub type ModelsRefreshed = Rc<dyn Fn(Result<usize, String>)>;
+
 /// Reactive mirrors of the `WindowState` slices the UI renders. Every field is a
 /// `Copy` signal, so `ViewSignals` is `Copy` and drops cheaply into closures and
 /// spawned tasks.
@@ -607,6 +612,47 @@ impl Engine {
             }
             view.connections_busy.set(false);
             done(result);
+        });
+    }
+
+    /// Refresh one connection's available models, **bypassing** the connector's
+    /// model cache (`ListAvailableModels { connection_id: Some(id), refresh:
+    /// true }`). Bedrock caches its model list, so this is how a user picks up a
+    /// newly-granted model without waiting for the cache to expire; every
+    /// connector supports the scoped refresh. `done` reports the model count (or
+    /// an error) for the panel's inline result — it deliberately does not touch
+    /// the chat's model picker, whose `models` signal is a full-list concern
+    /// refreshed on its own (a scoped result would wrongly drop other
+    /// connections' models from it).
+    pub fn refresh_connection_models(&self, connection_id: String, done: ModelsRefreshed) {
+        let Some(transport) = self.transport.clone() else {
+            done(Err(
+                "Not connected — try again once reconnected.".to_string()
+            ));
+            return;
+        };
+        spawn_local(async move {
+            match transport
+                .send_command(Command::ListAvailableModels {
+                    connection_id: Some(connection_id.clone()),
+                    refresh: true,
+                })
+                .await
+            {
+                Ok(CommandResult::Models(models)) => {
+                    // Count only this connection's models — defensive in case the
+                    // daemon ever answers a scoped request with the full list.
+                    let count = models
+                        .iter()
+                        .filter(|m| m.connection_id == connection_id)
+                        .count();
+                    done(Ok(count));
+                }
+                Ok(other) => done(Err(format!(
+                    "unexpected reply to ListAvailableModels: {other:?}"
+                ))),
+                Err(e) => done(Err(e)),
+            }
         });
     }
 

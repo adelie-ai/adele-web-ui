@@ -169,8 +169,15 @@ pub struct ConnForm {
     pub api_key_env: String,
     pub aws_profile: String,
     pub region: String,
-    /// Write-only credential input. Never populated from a view.
+    /// Write-only credential input for the single-field (api-key) connectors.
+    /// Never populated from a view.
     pub secret: String,
+    /// Bedrock's separate write-only credential inputs, joined on save into the
+    /// `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]` string. Never populated
+    /// from a view (the daemon never echoes a stored secret).
+    pub aws_access_key_id: String,
+    pub aws_secret_access_key: String,
+    pub aws_session_token: String,
     /// Explicit "clear the stored credential" toggle.
     pub clear_secret: bool,
     /// Unsurfaced fields carried through an edit unchanged.
@@ -189,6 +196,9 @@ impl ConnForm {
             aws_profile: String::new(),
             region: String::new(),
             secret: String::new(),
+            aws_access_key_id: String::new(),
+            aws_secret_access_key: String::new(),
+            aws_session_token: String::new(),
             clear_secret: false,
             preserved: PreservedFields::default(),
         }
@@ -253,6 +263,9 @@ impl ConnForm {
             aws_profile,
             region,
             secret: String::new(),
+            aws_access_key_id: String::new(),
+            aws_secret_access_key: String::new(),
+            aws_session_token: String::new(),
             clear_secret: false,
             preserved: PreservedFields::from_config(matched),
         }
@@ -272,10 +285,21 @@ impl ConnForm {
                 typed
             }
         };
-        let credential = if self.kind.accepts_credential() {
-            credential_action(&self.secret, self.clear_secret)
-        } else {
-            None
+        let credential = match self.kind {
+            // Bedrock takes three separate inputs, joined into the daemon's
+            // `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]` credential string.
+            ConnectorKind::Bedrock => bedrock_credential_action(
+                &self.aws_access_key_id,
+                &self.aws_secret_access_key,
+                &self.aws_session_token,
+                self.clear_secret,
+            ),
+            // The single-field api-key connectors send their raw key as-is.
+            ConnectorKind::Anthropic | ConnectorKind::OpenAi => {
+                credential_action(&self.secret, self.clear_secret)
+            }
+            // Ollama takes no credential.
+            ConnectorKind::Ollama => None,
         };
         Ok(BuiltConnection {
             editing_id: self.editing_id.clone(),
@@ -377,6 +401,51 @@ pub fn credential_action(raw: &str, clear_requested: bool) -> Option<CredentialA
     }
 }
 
+/// Join Bedrock's three credential inputs into the daemon's
+/// `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]` string.
+///
+/// Each field is whitespace-trimmed (paste hygiene — none of the parts carries
+/// significant surrounding whitespace). Returns `None` unless *both* required
+/// parts (access key id + secret access key) are present, so a partial or
+/// all-blank entry is "no credential" rather than a malformed half-string. The
+/// optional session token is appended only when non-blank, so a two-part
+/// credential never carries a dangling trailing colon.
+pub fn join_bedrock_credential(
+    access_key_id: &str,
+    secret_access_key: &str,
+    session_token: &str,
+) -> Option<String> {
+    let access = access_key_id.trim();
+    let secret = secret_access_key.trim();
+    let session = session_token.trim();
+    if access.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some(if session.is_empty() {
+        format!("{access}:{secret}")
+    } else {
+        format!("{access}:{secret}:{session}")
+    })
+}
+
+/// Decide the credential action for Bedrock's separate-fields form. An explicit
+/// clear wins over any typed text (mirrors [`credential_action`]); otherwise the
+/// three fields are joined via [`join_bedrock_credential`] — a complete pair
+/// becomes [`CredentialAction::Set`], anything short of it leaves the stored
+/// credential untouched (`None`).
+pub fn bedrock_credential_action(
+    access_key_id: &str,
+    secret_access_key: &str,
+    session_token: &str,
+    clear_requested: bool,
+) -> Option<CredentialAction> {
+    if clear_requested {
+        return Some(CredentialAction::Clear);
+    }
+    join_bedrock_credential(access_key_id, secret_access_key, session_token)
+        .map(CredentialAction::Set)
+}
+
 /// Build the [`Command::SetConnectionSecret`] for a credential action. A
 /// [`CredentialAction::Clear`] sends the empty string (the daemon's documented
 /// "clear" signal); the value is wrapped in [`Secret`] so it can't leak via
@@ -431,7 +500,7 @@ mod view {
         ConnForm, ConnectorKind, PreservedFields, availability_is_ok, availability_label,
         credentials_label,
     };
-    use crate::engine::{ActionDone, ViewSignals};
+    use crate::engine::{ActionDone, ModelsRefreshed, ViewSignals};
     use crate::settings::EngineHandle;
     use desktop_assistant_api_model::ConnectionView;
 
@@ -451,11 +520,17 @@ mod view {
         aws_profile: RwSignal<String>,
         region: RwSignal<String>,
         secret: RwSignal<String>,
+        aws_access_key_id: RwSignal<String>,
+        aws_secret_access_key: RwSignal<String>,
+        aws_session_token: RwSignal<String>,
         clear_secret: RwSignal<bool>,
         preserved: RwSignal<PreservedFields>,
         /// Whether the connection being edited already has a stored credential
         /// (display-only — the secret itself is never fetched).
         has_credentials: RwSignal<bool>,
+        /// The inline result of the per-connection "Refresh models" action
+        /// (item 3), or `None` before it's used. Reset on every form open.
+        refresh_status: RwSignal<Option<String>>,
         error: RwSignal<Option<String>>,
     }
 
@@ -471,9 +546,13 @@ mod view {
                 aws_profile: RwSignal::new(String::new()),
                 region: RwSignal::new(String::new()),
                 secret: RwSignal::new(String::new()),
+                aws_access_key_id: RwSignal::new(String::new()),
+                aws_secret_access_key: RwSignal::new(String::new()),
+                aws_session_token: RwSignal::new(String::new()),
                 clear_secret: RwSignal::new(false),
                 preserved: RwSignal::new(PreservedFields::default()),
                 has_credentials: RwSignal::new(false),
+                refresh_status: RwSignal::new(None),
                 error: RwSignal::new(None),
             }
         }
@@ -488,9 +567,13 @@ mod view {
             self.aws_profile.set(f.aws_profile);
             self.region.set(f.region);
             self.secret.set(f.secret);
+            self.aws_access_key_id.set(f.aws_access_key_id);
+            self.aws_secret_access_key.set(f.aws_secret_access_key);
+            self.aws_session_token.set(f.aws_session_token);
             self.clear_secret.set(f.clear_secret);
             self.preserved.set(f.preserved);
             self.has_credentials.set(has_credentials);
+            self.refresh_status.set(None);
             self.error.set(None);
             self.open.set(true);
         }
@@ -515,6 +598,9 @@ mod view {
                 aws_profile: self.aws_profile.get_untracked(),
                 region: self.region.get_untracked(),
                 secret: self.secret.get_untracked(),
+                aws_access_key_id: self.aws_access_key_id.get_untracked(),
+                aws_secret_access_key: self.aws_secret_access_key.get_untracked(),
+                aws_session_token: self.aws_session_token.get_untracked(),
                 clear_secret: self.clear_secret.get_untracked(),
                 preserved: self.preserved.get_untracked(),
             }
@@ -833,6 +919,17 @@ mod view {
                 // Credential entry (hidden for connectors that take none).
                 {move || credential_section(form)}
 
+                // Per-connection "Refresh models" (edit only — a connection must
+                // exist to refresh it). All connectors can refresh; Bedrock (which
+                // caches its model list) is the motivating case.
+                {move || {
+                    if form.editing_id.get().is_some() {
+                        refresh_models_section(engine, form).into_any()
+                    } else {
+                        ().into_any()
+                    }
+                }}
+
                 <Show when=move || form.error.get().is_some()>
                     <p class="conn-error" role="alert">
                         {move || form.error.get().unwrap_or_default()}
@@ -896,7 +993,9 @@ mod view {
         }
     }
 
-    /// The write-only credential entry: current state, a password input, an
+    /// The write-only credential entry: current state, the credential
+    /// input(s) — a single API-key field, or Bedrock's three separate fields
+    /// (Access Key ID / Secret Access Key / optional Session Token) — an
     /// explicit "clear" toggle (only when one is stored), and the posture note.
     /// Renders nothing for connectors that take no credential (Ollama).
     fn credential_section(form: FormState) -> AnyView {
@@ -910,14 +1009,7 @@ mod view {
                 <p class="conn-note muted">
                     {move || credentials_label(form.has_credentials.get())}
                 </p>
-                <input
-                    class="conn-input"
-                    type="password"
-                    autocomplete="off"
-                    placeholder=kind.credential_placeholder()
-                    prop:value=move || form.secret.get()
-                    on:input=move |ev| form.secret.set(event_target_value(&ev))
-                />
+                {credential_inputs(kind, form)}
                 <Show when=move || form.has_credentials.get()>
                     <label class="conn-check">
                         <input
@@ -934,6 +1026,96 @@ mod view {
             </div>
         }
         .into_any()
+    }
+
+    /// The credential input control(s) for `kind`: Bedrock gets three separate
+    /// write-only fields (joined on save into `ACCESS_KEY_ID:SECRET[:SESSION]`);
+    /// the api-key connectors get one raw-key field.
+    fn credential_inputs(kind: ConnectorKind, form: FormState) -> AnyView {
+        match kind {
+            ConnectorKind::Bedrock => view! {
+                {cred_field("Access Key ID", form.aws_access_key_id, "AKIA\u{2026}", false)}
+                {cred_field("Secret Access Key", form.aws_secret_access_key, "Secret access key", true)}
+                {cred_field(
+                    "Session Token (optional)",
+                    form.aws_session_token,
+                    "Only for temporary credentials",
+                    true,
+                )}
+            }
+            .into_any(),
+            _ => view! {
+                <input
+                    class="conn-input"
+                    type="password"
+                    autocomplete="off"
+                    placeholder=kind.credential_placeholder()
+                    prop:value=move || form.secret.get()
+                    on:input=move |ev| form.secret.set(event_target_value(&ev))
+                />
+            }
+            .into_any(),
+        }
+    }
+
+    /// One labelled write-only credential input (Bedrock's separate fields).
+    /// `password` masks the value while typing (the secret + session token);
+    /// the Access Key ID is a plain identifier, so it stays legible.
+    fn cred_field(
+        label: &'static str,
+        value: RwSignal<String>,
+        placeholder: &'static str,
+        password: bool,
+    ) -> impl IntoView {
+        view! {
+            <div class="conn-cred-field">
+                <label class="sub-label">{label}</label>
+                <input
+                    class="conn-input"
+                    type=if password { "password" } else { "text" }
+                    autocomplete="off"
+                    placeholder=placeholder
+                    prop:value=move || value.get()
+                    on:input=move |ev| value.set(event_target_value(&ev))
+                />
+            </div>
+        }
+    }
+
+    /// The per-connection "Refresh models" action (item 3), shown only when
+    /// editing an existing connection. Triggers a cache-bypassing
+    /// `ListAvailableModels { connection_id, refresh: true }` and shows the
+    /// resulting model count (or an error) inline. Mirrors the KCM's Bedrock
+    /// "Refresh models" button, but offered for every connector.
+    fn refresh_models_section(engine: EngineHandle, form: FormState) -> impl IntoView {
+        let status = form.refresh_status;
+        let on_refresh = move |_| {
+            let Some(id) = form.editing_id.get_untracked() else {
+                return;
+            };
+            status.set(Some("Refreshing\u{2026}".to_string()));
+            let done: ModelsRefreshed = Rc::new(move |res: Result<usize, String>| match res {
+                Ok(count) => status.set(Some(format!(
+                    "{count} model{} available",
+                    if count == 1 { "" } else { "s" }
+                ))),
+                Err(e) => status.set(Some(format!("Refresh failed: {e}"))),
+            });
+            engine.with_value(|e| e.borrow().refresh_connection_models(id, done));
+        };
+        view! {
+            <div class="field conn-refresh">
+                <span class="field-label">"Models"</span>
+                <button class="conn-btn conn-refresh-btn" on:click=on_refresh>
+                    "\u{21bb} Refresh models"
+                </button>
+                <Show when=move || status.get().is_some()>
+                    <p class="conn-note muted conn-refresh-status" role="status">
+                        {move || status.get().unwrap_or_default()}
+                    </p>
+                </Show>
+            </div>
+        }
     }
 }
 
@@ -1042,6 +1224,87 @@ mod tests {
         assert_eq!(credential_action("   \t ", false), None);
     }
 
+    // --- join_bedrock_credential (item 2: separate Bedrock fields) ------------
+
+    #[test]
+    fn join_bedrock_two_parts_has_no_trailing_colon() {
+        // Access key id + secret, no session token: exactly `ACCESS:SECRET`.
+        assert_eq!(
+            join_bedrock_credential("AKIAEXAMPLE", "wJalr/secret", ""),
+            Some("AKIAEXAMPLE:wJalr/secret".to_string())
+        );
+    }
+
+    #[test]
+    fn join_bedrock_three_parts_appends_session_token() {
+        assert_eq!(
+            join_bedrock_credential("AKIAEXAMPLE", "wJalr/secret", "FwoGZXIvYXdz//SESSION"),
+            Some("AKIAEXAMPLE:wJalr/secret:FwoGZXIvYXdz//SESSION".to_string())
+        );
+    }
+
+    #[test]
+    fn join_bedrock_trims_each_field() {
+        // Surrounding whitespace (e.g. a pasted key with a trailing newline) is
+        // stripped from every part before joining.
+        assert_eq!(
+            join_bedrock_credential("  AKIAEXAMPLE\n", "\twJalr/secret ", "  TOKEN\n"),
+            Some("AKIAEXAMPLE:wJalr/secret:TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn join_bedrock_all_blank_is_none() {
+        assert_eq!(join_bedrock_credential("", "", ""), None);
+        assert_eq!(join_bedrock_credential("  ", "\t", " \n "), None);
+    }
+
+    #[test]
+    fn join_bedrock_requires_both_access_and_secret() {
+        // A partial entry (only one of the required pair) is "no credential",
+        // never a malformed half-string like `AKIA:` or `:secret`.
+        assert_eq!(join_bedrock_credential("AKIAEXAMPLE", "", ""), None);
+        assert_eq!(join_bedrock_credential("", "wJalr/secret", ""), None);
+        // A session token alone can never stand in for the required pair.
+        assert_eq!(join_bedrock_credential("", "", "TOKEN"), None);
+    }
+
+    #[test]
+    fn join_bedrock_blank_session_is_dropped() {
+        // Whitespace-only session token collapses to the two-part form.
+        assert_eq!(
+            join_bedrock_credential("AKIAEXAMPLE", "wJalr/secret", "   "),
+            Some("AKIAEXAMPLE:wJalr/secret".to_string())
+        );
+    }
+
+    // --- bedrock_credential_action --------------------------------------------
+
+    #[test]
+    fn bedrock_credential_action_sets_joined_value() {
+        assert_eq!(
+            bedrock_credential_action("AKIAEXAMPLE", "wJalr/secret", "", false),
+            Some(CredentialAction::Set(
+                "AKIAEXAMPLE:wJalr/secret".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn bedrock_credential_action_clear_wins_over_typed_fields() {
+        // An explicit clear removes the secret even with stray field text.
+        assert_eq!(
+            bedrock_credential_action("AKIAEXAMPLE", "wJalr/secret", "TOKEN", true),
+            Some(CredentialAction::Clear)
+        );
+    }
+
+    #[test]
+    fn bedrock_credential_action_blank_no_clear_is_none() {
+        // The write-only no-op: blank fields must never wipe a stored secret.
+        assert_eq!(bedrock_credential_action("", "", "", false), None);
+    }
+
     // --- secret_command (wire shape + redaction) ------------------------------
 
     #[test]
@@ -1143,6 +1406,69 @@ mod tests {
             }
             other => panic!("expected Bedrock, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_bedrock_joins_separate_credential_fields() {
+        // The three write-only inputs join into the daemon's credential string.
+        let mut form = ConnForm::blank(ConnectorKind::Bedrock);
+        form.id = "aws".into();
+        form.aws_access_key_id = "AKIAEXAMPLE".into();
+        form.aws_secret_access_key = "wJalr/secret".into();
+        let built = form.build().expect("valid form builds");
+        assert_eq!(
+            built.credential,
+            Some(CredentialAction::Set("AKIAEXAMPLE:wJalr/secret".into()))
+        );
+        // The single `secret` field is irrelevant for Bedrock.
+        let mut form2 = form.clone();
+        form2.aws_session_token = "SESSION-TOKEN".into();
+        let built2 = form2.build().expect("valid form builds");
+        assert_eq!(
+            built2.credential,
+            Some(CredentialAction::Set(
+                "AKIAEXAMPLE:wJalr/secret:SESSION-TOKEN".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn build_bedrock_blank_credential_fields_are_no_change() {
+        // No credential fields typed and no clear: the stored secret is untouched.
+        let mut form = ConnForm::blank(ConnectorKind::Bedrock);
+        form.id = "aws".into();
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.credential, None);
+    }
+
+    #[test]
+    fn build_bedrock_clear_credential() {
+        let mut form = ConnForm::blank(ConnectorKind::Bedrock);
+        form.editing_id = Some("aws".into());
+        form.clear_secret = true;
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.credential, Some(CredentialAction::Clear));
+    }
+
+    #[test]
+    fn from_view_never_prefills_bedrock_credential_fields() {
+        // has_credentials is true, but the three credential inputs stay empty and
+        // no clear is staged — a stored secret is never echoed or round-tripped.
+        let config = ConnectionConfigView::Bedrock {
+            aws_profile: Some("prod".into()),
+            region: Some("us-west-2".into()),
+            base_url: None,
+            connect_timeout_secs: None,
+            stream_timeout_secs: None,
+            max_context_tokens: None,
+        };
+        let form = ConnForm::from_view(&view("aws", "bedrock", Some(config)));
+        assert_eq!(form.aws_access_key_id, "");
+        assert_eq!(form.aws_secret_access_key, "");
+        assert_eq!(form.aws_session_token, "");
+        assert!(!form.clear_secret);
+        // The build carries no credential when the fields are left blank.
+        assert_eq!(form.build().expect("valid").credential, None);
     }
 
     #[test]

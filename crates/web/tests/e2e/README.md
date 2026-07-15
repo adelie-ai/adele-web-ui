@@ -181,3 +181,59 @@ The pure decision core (enable / dedup / blank-skip / cancel) is unit-tested und
 ```sh
 cd tests/e2e && npm run test:read-aloud
 ```
+
+## `settings_nav_layout.mjs`
+
+Layout regression for the settings-sheet nav strip (UX fix item 1). A fake BFF
+answers the initial load plus `list_connections` with **many** connections, so
+the Connections panel body is long enough to scroll on a phone-sized viewport
+(390x667). It asserts, in a real browser, that the section nav strip
+(`.sheet-tabs`) keeps (near) full height rather than being squished away, that
+the panel body (`.sheet-body`) — not the whole sheet — is the vertical scroll
+container (it overflows its own client box while the sheet stays within the
+viewport), and that after scrolling the body to the bottom the nav strip stays
+fixed (same top, same height) and fully visible. Before the fix, every flex
+child of the height-capped sheet shared the shrink and the nav collapsed toward
+zero. Fails on any uncaught wasm panic. The fix is pure CSS (`styles.css`), so
+there is no companion host test.
+
+```sh
+cd tests/e2e && npm run test:nav-layout
+```
+
+## `bedrock_credentials.mjs`
+
+Browser check for Bedrock's separate credential fields (UX fix item 2). A fake
+BFF lists one Bedrock connection and **records** every `set_connection_secret`
+it receives. It drives the real client in headless Chromium and asserts that
+configuring the Bedrock connection shows **three** separate write-only inputs —
+Access Key ID (text), Secret Access Key (password), Session Token (password),
+not one glued field — that saving with all three joins them on the wire into
+`ACCESS_KEY_ID:SECRET_ACCESS_KEY:SESSION_TOKEN`, that saving with no session
+token yields `ACCESS_KEY_ID:SECRET_ACCESS_KEY` with **no** trailing colon, and
+that the fields are write-only (blank on every reopen, never pre-filled). Fails
+on any uncaught wasm panic.
+
+The pure join logic (`join_bedrock_credential` / `bedrock_credential_action` /
+`ConnForm::build`) is unit-tested under `just check` in `src/connections.rs`;
+this covers the three-field render + the joined wire payload those host tests
+can't reach.
+
+```sh
+cd tests/e2e && npm run test:bedrock-credentials
+```
+
+## `connection_model_refresh.mjs`
+
+Browser check for the per-connection "Refresh models" action (UX fix item 3). A
+fake BFF lists one connection and records the scoped `list_available_models` the
+refresh action issues. It asserts, in a real browser, that the connection edit
+form shows a "Refresh models" button, that clicking it sends
+`list_available_models { connection_id: <id>, refresh: true }` on the wire (the
+cache-bypassing scoped form the KCM uses for Bedrock), and that the resulting
+model count surfaces inline ("2 models available"). Fails on any uncaught wasm
+panic.
+
+```sh
+cd tests/e2e && npm run test:model-refresh
+```
