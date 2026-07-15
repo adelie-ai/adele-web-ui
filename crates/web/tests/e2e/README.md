@@ -268,3 +268,56 @@ panic.
 ```sh
 cd tests/e2e && npm run test:model-refresh
 ```
+
+## `chat_markdown.mjs`
+
+Coverage for chat markdown rendering (issue #48). The fake BFF acks a sent
+message and streams back one rich, partly-hostile markdown reply — a heading,
+bold + inline code, a bulleted list, a link, a very long fenced code line, and
+`<script>` + `<img onerror>` XSS attempts — in two deltas, the first ending on an
+**unterminated code fence**, then a completion. It asserts, in a real headless
+Chromium: (1) the settled reply renders as formatted HTML (`<h1>`, `<strong>`,
+`<ul>/<li>`, a safe `<a>` with `href` + `target=_blank` + `rel` noopener, and a
+`<pre>`) rather than the old escaped plain text; (2) the script/onerror attempts
+never execute (no `alert`, no injected flag) and leave no `<script>`/`onerror`
+token in the rendered bubble — `ammonia` stripped them before `inner_html`; (3)
+the code block scrolls horizontally in its own container (`pre.scrollWidth >
+clientWidth`) while the page body does **not** scroll sideways; and (4) streaming
+is graceful — the unterminated-fence partial renders a `<pre>` mid-stream without
+breaking the page and settles to the final render on completion. Also fails on
+any uncaught wasm panic.
+
+The pure md→sanitized-HTML core (formatting + the sanitizer) is unit-tested under
+`just check` in `src/markdown.rs`; this covers only the browser render +
+horizontal-scroll + no-execution layer those host tests can't reach.
+
+```sh
+cd tests/e2e && npm run test:markdown
+```
+
+## `chat_markdown_xss.mjs`
+
+Adversarial XSS gauntlet for chat markdown (issue #48) — the companion to
+`chat_markdown.mjs`, which proves formatting + a representative attempt. This one
+streams a **broad battery of hostile constructs, each in its own assistant turn**
+(a fresh top-level parse — the strongest adversarial context, and it stops one
+payload's unclosed tag from swallowing the next) and asserts, in real headless
+Chromium, that after **every** turn nothing executed (`window.__pwned` never set,
+`alert` never fired, no native dialog, no wasm error) and the rendered bubble
+contains no dangerous token (`<script>`/`<iframe>`/`<svg>`/`<math>`/`<style>`/
+`<base>`/`<form>`/`<object>`/`<embed>`), no `on*` handler, no dangerous element,
+and no `javascript:` / `data:text/html` href — with the forced `target="_blank"`
+never overridable to `_self`. A stripped-to-empty bubble is a pass (the payload
+was correctly removed). The battery covers the ways sanitizers usually break:
+foreign-content namespace-confusion mXSS (`<svg>`/`<math>` + `<style>` breakout),
+entity/whitespace/`&colon;`-obfuscated `javascript:` in markdown links and raw
+anchors, `data:text/html` in href + img src, SVG `onload` + inline
+`<svg><script>`, `<iframe>`/`<form action=js>`/`formaction`/`<base href=js>`/
+`<style>@import js`, tag-splitting (`<scr<script>ipt>`), and handlers on an
+allowed tag. The pure sanitizer core is unit-tested under `just check` in
+`src/markdown.rs`; this covers the browser no-execution + no-surviving-token
+layer those host tests can't reach.
+
+```sh
+cd tests/e2e && npm run test:markdown-xss
+```

@@ -34,6 +34,15 @@ base64 = "0.22"
 # correlation. Kept on *both* targets so the timer-agnostic reply-timeout core
 # (`src/reply.rs`) compiles and unit-tests on the host, like `wire`/`model`.
 futures = "0.3"
+# Chat markdown → sanitized HTML (issue #48). Assistant output is UNTRUSTED, so
+# the parser's HTML is passed through `ammonia` (an html5ever-backed sanitizer)
+# to strip `<script>`, event handlers, and unsafe URL schemes before it ever
+# reaches the DOM via `inner_html`. Both crates are pure Rust and compile to
+# wasm AND the host, so the `markdown_to_html` core is host-tested in
+# `src/markdown.rs` like `wire`/`model`. Same versions the GTK client uses
+# (`adele-gtk/src/markdown.rs`), so the sanitizer posture is shared and auditable.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+ammonia = "4"
 
 # --- Wasm-only dependencies ---------------------------------------------------
 # Excluded from the host build so `cargo test` (native) stays light and the pure

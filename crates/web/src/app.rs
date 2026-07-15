@@ -295,13 +295,20 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                         .get()
                         .into_iter()
                         .map(|m| {
-                            view! { <div class=format!("msg {}", m.role)><p>{m.content}</p></div> }
+                            // Render message content as sanitized markdown (issue
+                            // #48) instead of the old escaped `<p>{content}</p>`.
+                            view! {
+                                <div class=format!(
+                                    "msg {}",
+                                    m.role,
+                                )>{crate::markdown::message_body(&m.content)}</div>
+                            }
                         })
                         .collect_view()
                 }}
                 <Show when=move || view.streaming_active.get()>
                     <div class="msg assistant streaming">
-                        <p>{move || view.streaming.get()}</p>
+                        {crate::markdown::streaming_body(view.streaming)}
                     </div>
                 </Show>
             </section>

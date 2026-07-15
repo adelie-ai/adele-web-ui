@@ -33,6 +33,11 @@ mod context;
 mod global_personality;
 #[cfg(any(target_arch = "wasm32", test))]
 mod knowledge;
+// Chat markdown → sanitized HTML (issue #48): the pure `markdown_to_html`
+// parse+sanitize core is host-tested here; a `#[cfg(target_arch = "wasm32")]`
+// view sub-module sets the sanitized HTML in the Leptos chat bubbles.
+#[cfg(any(target_arch = "wasm32", test))]
+mod markdown;
 #[cfg(any(target_arch = "wasm32", test))]
 mod model;
 #[cfg(any(target_arch = "wasm32", test))]
