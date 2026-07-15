@@ -13,6 +13,7 @@
     "test:scratchpad": "node scratchpad_view.mjs",
     "test:knowledge": "node knowledge_panel.mjs",
     "test:read-aloud": "node read_aloud.mjs",
+    "test:reauth": "node reauth_recovery.mjs",
     "test:nav-layout": "node settings_nav_layout.mjs",
     "test:bedrock-credentials": "node bedrock_credentials.mjs",
     "test:model-refresh": "node connection_model_refresh.mjs"

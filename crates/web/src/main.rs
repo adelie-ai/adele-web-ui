@@ -39,6 +39,11 @@ mod model;
 mod personality;
 #[cfg(any(target_arch = "wasm32", test))]
 mod purposes;
+// Pure re-auth primitives (issue #42): JWT `exp` classification + the
+// reconnect/auth-bail policy, host-tested here and consumed by `auth`/`app` on
+// wasm.
+#[cfg(any(target_arch = "wasm32", test))]
+mod reauth;
 // Browser read-aloud (issue #18): the pure decision core (host-testable) plus a
 // `#[cfg(target_arch = "wasm32")]` `SpeechSynthesis` view — speaks completed
 // assistant replies in-browser, no daemon change.

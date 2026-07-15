@@ -10,6 +10,7 @@ version = "0.1.0"
 name = "adele-web-ui-web"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "client-ui-common",
  "console_error_panic_hook",
  "desktop-assistant-api-model",
@@ -17,6 +18,7 @@ dependencies = [
  "gloo-net",
  "gloo-storage",
  "gloo-timers",
+ "js-sys",
  "leptos",
  "serde",
  "serde_json",
