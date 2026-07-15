@@ -81,11 +81,16 @@ const RELAY_ORIGIN_SESSION: &str = "__bff_relay__";
 /// receiving browser's own send, so it keeps the daemon's `request_id` (the
 /// reducer routes a not-initiated turn by that stable id).
 ///
-/// Returns `None` for signals the web UI does not surface — background `Task*`
-/// (no process-manager panel) and `ClientToolCall` (the web client is not an MCP
-/// host) — and for the `Disconnected` control signal. `KnowledgeChanged` DOES
-/// map (#39); it carries no conversation, so [`relay_signal`] broadcasts it
-/// user-scoped rather than routing by conversation.
+/// The background-task lifecycle (`TaskStarted` / `TaskProgress` /
+/// `TaskCompleted`) DOES map now (the tasks panel, #50). Like `KnowledgeChanged`
+/// (#39) these carry no conversation, so [`relay_signal`] broadcasts them
+/// user-scoped rather than routing by conversation. `TaskLogAppended` stays
+/// unsurfaced — the panel shows status/progress, not per-task logs, so its
+/// (potentially large) log payloads are never shipped to the browser.
+///
+/// Returns `None` for the remaining unsurfaced signals — `TaskLogAppended`
+/// (above) and `ClientToolCall` (the web client is not an MCP host) — and for
+/// the `Disconnected` control signal.
 pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
     match signal {
         SignalEvent::UserMessageAdded {
@@ -172,12 +177,28 @@ pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
         // conversation, so `relay_signal` broadcasts it to all of the user's
         // sessions rather than routing by conversation.
         SignalEvent::KnowledgeChanged => Some(api::Event::KnowledgeChanged),
-        // Not surfaced by the web UI (no process-manager panel, not an MCP host),
-        // and `Disconnected` is a control signal handled by the loop.
-        SignalEvent::TaskStarted { .. }
-        | SignalEvent::TaskProgress { .. }
-        | SignalEvent::TaskLogAppended { .. }
-        | SignalEvent::TaskCompleted { .. }
+        // User-scoped (#50): the background-task lifecycle. Like KnowledgeChanged
+        // these carry no conversation, so `relay_signal` broadcasts them to all
+        // of the user's sessions so an open tasks panel live-updates.
+        SignalEvent::TaskStarted { task } => Some(api::Event::TaskStarted { task: task.clone() }),
+        SignalEvent::TaskProgress { id, progress_hint } => Some(api::Event::TaskProgress {
+            id: id.clone(),
+            progress_hint: progress_hint.clone(),
+        }),
+        SignalEvent::TaskCompleted {
+            id,
+            status,
+            last_error,
+        } => Some(api::Event::TaskCompleted {
+            id: id.clone(),
+            status: *status,
+            last_error: last_error.clone(),
+        }),
+        // Not surfaced by the web UI: `TaskLogAppended` (the panel shows status/
+        // progress, not per-task logs, so log payloads are never shipped) and
+        // `ClientToolCall` (not an MCP host); `Disconnected` is a control signal
+        // handled by the loop.
+        SignalEvent::TaskLogAppended { .. }
         | SignalEvent::ClientToolCall { .. }
         | SignalEvent::Disconnected { .. } => None,
     }
@@ -468,14 +489,23 @@ mod tests {
     }
 
     #[test]
-    fn background_and_control_signals_are_not_relayed() {
-        // The web UI has no process-manager panel, is not an MCP host, and
+    fn unsurfaced_and_control_signals_are_not_relayed() {
+        // `TaskLogAppended` is unsurfaced (the tasks panel shows status/progress,
+        // not per-task logs — #50), the web UI is not an MCP host, and
         // `Disconnected` is a control signal — none map to a relayable event.
-        // (`KnowledgeChanged` IS relayed now, user-scoped — see its own tests.)
+        // (`KnowledgeChanged` and the Task* lifecycle ARE relayed now,
+        // user-scoped — see their own tests.)
         for signal in [
-            SignalEvent::TaskProgress {
+            SignalEvent::TaskLogAppended {
                 id: "t1".into(),
-                progress_hint: None,
+                entry: api::TaskLogEntry {
+                    seq: 1,
+                    timestamp: 0,
+                    level: api::LogLevel::Info,
+                    category: api::LogCategory::Status,
+                    message: "hi".into(),
+                    data: None,
+                },
             },
             SignalEvent::ClientToolCall {
                 task_id: "t1".into(),
@@ -501,8 +531,9 @@ mod tests {
         // The routing invariant for CONVERSATION-scoped events: each MUST carry a
         // conversation id so `relay_signal` routes rather than drops it. Pin the
         // whole conversation-scoped set so a new such variant can't forget one.
-        // (The one user-scoped exception, `KnowledgeChanged`, deliberately has no
-        // conversation and is broadcast instead — see its own tests.)
+        // (The user-scoped exceptions — `KnowledgeChanged` and the Task*
+        // lifecycle — deliberately carry no conversation and are broadcast
+        // instead; see their own tests.)
         let relayed = [
             SignalEvent::UserMessageAdded {
                 conversation_id: "c1".into(),

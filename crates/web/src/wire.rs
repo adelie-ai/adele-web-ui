@@ -13,9 +13,10 @@ use desktop_assistant_api_model::Event;
 
 /// Map a wire [`Event`] onto the shared reducer's [`UiMessage`].
 ///
-/// Returns `None` for events the SPA does not surface yet — background tasks,
-/// client-tool calls, and config pushes — so the caller can drop them. These
-/// gain arms as their screens land (each has a ready `UiMessage` counterpart in
+/// Returns `None` for events the SPA does not surface — client-tool calls,
+/// config pushes, and per-task logs (`TaskLogAppended`: the tasks panel shows
+/// status/progress, not logs) — so the caller can drop them. Remaining arms gain
+/// as their screens land (each has a ready `UiMessage` counterpart in
 /// `client-ui-common`).
 pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
     let msg = match event {
@@ -104,6 +105,18 @@ pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
         // Mapping it — rather than dropping it via the `_` arm — is what lets the
         // panel live-update; the BFF relay broadcasts it user-scoped.
         Event::KnowledgeChanged => UiMessage::KnowledgeChanged,
+        // Background tasks (issue #50): the reducer models the task lifecycle and
+        // turns these into the host-facing `Effect::Task*` family the engine
+        // mirrors into its `tasks` signal. The BFF relay broadcasts them
+        // user-scoped (they carry no conversation).
+        Event::TaskStarted { task } => UiMessage::TaskStarted(task),
+        Event::TaskProgress { id, progress_hint } => UiMessage::TaskProgress { id, progress_hint },
+        // `UiMessage::TaskCompleted` carries only the id: the reducer's effect
+        // then triggers the engine's authoritative re-fetch (which reflects the
+        // real terminal `Completed`/`Failed`/`Cancelled` status and keeps the
+        // finished task visible as "recent"), so the wire event's `status` /
+        // `last_error` are intentionally dropped here.
+        Event::TaskCompleted { id, .. } => UiMessage::TaskCompleted { id },
         _ => return None,
     };
     Some(msg)
