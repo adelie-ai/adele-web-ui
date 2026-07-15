@@ -10,6 +10,8 @@ use gloo_net::http::Request;
 use gloo_storage::{LocalStorage, Storage};
 use serde::Deserialize;
 
+use crate::reauth::{DEFAULT_SKEW_SECS, TokenExpiry, classify_token_expiry};
+
 /// `localStorage` key for the persisted session token.
 const TOKEN_KEY: &str = "adele.token";
 
@@ -18,9 +20,36 @@ struct LoginResponse {
     token: String,
 }
 
-/// The persisted token from a previous session, if any.
+/// Current wall-clock time in whole seconds since the Unix epoch (browser clock),
+/// for comparing against a token's `exp`.
+fn now_secs() -> u64 {
+    // `Date::now()` is milliseconds since the epoch; it is always finite and
+    // positive in a browser, so the truncating cast is safe.
+    (js_sys::Date::now() / 1000.0) as u64
+}
+
+/// Whether `token`'s `exp` is already past (within a small clock-skew margin).
+/// A token whose expiry can't be read is **not** treated as expired here — the
+/// connect path's fast-failure guard is the backstop, so a decode quirk never
+/// locks anyone out pre-emptively.
+pub fn token_is_expired(token: &str) -> bool {
+    matches!(
+        classify_token_expiry(token, now_secs(), DEFAULT_SKEW_SECS),
+        TokenExpiry::Expired
+    )
+}
+
+/// The persisted token from a previous session — but only if it isn't already
+/// expired. An expired token is forgotten (cleared from storage) and `None`
+/// returned, so the app opens on the login screen instead of attempting a doomed
+/// `/ws` upgrade with a dead token (issue #42).
 pub fn load_token() -> Option<String> {
-    LocalStorage::get::<String>(TOKEN_KEY).ok()
+    let token = LocalStorage::get::<String>(TOKEN_KEY).ok()?;
+    if token_is_expired(&token) {
+        clear_token();
+        return None;
+    }
+    Some(token)
 }
 
 fn store_token(token: &str) {

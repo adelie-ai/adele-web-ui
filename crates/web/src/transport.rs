@@ -20,6 +20,7 @@ use desktop_assistant_api_model::{Command, CommandResult, WsFrame, WsRequest};
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::Message;
+use gloo_net::websocket::State;
 use gloo_net::websocket::futures::WebSocket;
 use gloo_timers::future::TimeoutFuture;
 use wasm_bindgen_futures::spawn_local;
@@ -116,17 +117,79 @@ impl Transport {
     }
 }
 
-/// Open a socket to `ws_url`, presenting `token` via the auth subprotocol, and
-/// spawn its read/write pumps. Incoming events are mapped and pushed onto
-/// `ui_tx`; a `Disconnected` message and the `closed` one-shot both fire when
-/// the socket ends.
-pub fn connect(
+/// Why a connection attempt did not begin a live, authenticated session. The
+/// session loop uses these to tell an auth refusal (drop to login after a few in
+/// a row, see [`crate::reauth`]) from an ordinary connectivity problem (keep
+/// retrying with backoff).
+#[derive(Debug)]
+pub enum ConnectError {
+    /// The socket couldn't even be constructed (bad URL / browser refusal).
+    Construct(String),
+    /// The upgrade resolved to a close *before ever opening* — the BFF refused
+    /// the token (expiry / key rotation / revocation) or is unreachable; the
+    /// browser can't distinguish these. Repeated occurrences with no working
+    /// session between them are treated as an auth rejection.
+    RejectedUpgrade,
+    /// The socket was still connecting past the upgrade timeout — a connectivity
+    /// stall, not a refusal.
+    Unreachable,
+}
+
+/// Poll interval while the `/ws` upgrade is resolving. The handshake either opens
+/// or is refused within a network round-trip; briefly polling the ready-state is
+/// simpler and more robust than reaching into gloo-net's internal waker, and adds
+/// only a couple of frames of latency.
+const UPGRADE_POLL_MS: u32 = 20;
+
+/// Cap on waiting for the upgrade to resolve before calling it a connectivity
+/// stall rather than a refusal. A reachable BFF accepts or refuses in well under
+/// a second; a socket still CONNECTING past this is a network problem (retry),
+/// not an auth one (drop to login).
+const UPGRADE_TIMEOUT_MS: u32 = 8_000;
+
+/// Await the upgrade leaving CONNECTING: `Ok(())` once the socket is OPEN, or a
+/// [`ConnectError`] if it closed before opening (refusal) or never resolved
+/// (stall). Crucially this returns **before** anything is written to the socket,
+/// so a refused upgrade never triggers the browser's "WebSocket is already in
+/// CLOSING or CLOSED state" warning that the old optimistic write-then-fail loop
+/// produced on every doomed reconnect.
+async fn await_upgrade(ws: &WebSocket) -> Result<(), ConnectError> {
+    let mut waited = 0u32;
+    loop {
+        match ws.state() {
+            State::Open => return Ok(()),
+            State::Closing | State::Closed => return Err(ConnectError::RejectedUpgrade),
+            State::Connecting => {
+                if waited >= UPGRADE_TIMEOUT_MS {
+                    return Err(ConnectError::Unreachable);
+                }
+                TimeoutFuture::new(UPGRADE_POLL_MS).await;
+                waited = waited.saturating_add(UPGRADE_POLL_MS);
+            }
+        }
+    }
+}
+
+/// Open a socket to `ws_url`, presenting `token` via the auth subprotocol, and —
+/// **once the upgrade has actually opened** — spawn its read/write pumps.
+/// Incoming events are mapped and pushed onto `ui_tx`; a `Disconnected` message
+/// and the `closed` one-shot both fire when the socket ends. Returns a
+/// [`ConnectError`] if the upgrade is refused or the server is unreachable,
+/// without ever writing to (and thus without spamming) a dead socket.
+pub async fn connect(
     ws_url: &str,
     token: &str,
     ui_tx: mpsc::UnboundedSender<UiMessage>,
-) -> Result<Connection, String> {
+) -> Result<Connection, ConnectError> {
     let ws = WebSocket::open_with_protocols(ws_url, &[BEARER_SUBPROTOCOL, token])
-        .map_err(|e| format!("open websocket: {e}"))?;
+        .map_err(|e| ConnectError::Construct(e.to_string()))?;
+
+    // Wait for the upgrade to open before splitting the socket or spawning the
+    // pumps. A rejected token transitions CONNECTING -> CLOSED without opening;
+    // returning here means we never queue a doomed send (no console spam) and the
+    // session loop gets a clean refused-vs-opened signal to drive re-auth.
+    await_upgrade(&ws).await?;
+
     let (write, read) = ws.split();
 
     let (out_tx, out_rx) = mpsc::unbounded::<String>();

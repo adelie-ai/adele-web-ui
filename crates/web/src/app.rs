@@ -19,8 +19,10 @@ use wasm_bindgen_futures::spawn_local;
 use client_ui_common::UiMessage;
 
 use crate::engine::{Engine, ViewSignals};
+use crate::reauth::{AttemptOutcome, ReconnectAction};
 use crate::settings::{self, SettingsPanel, SettingsSheet};
-use crate::{auth, context, transport};
+use crate::transport::ConnectError;
+use crate::{auth, context, reauth, transport};
 
 /// Root component. Shows the login screen until a token is present, then the
 /// chat screen; signing out clears the token and returns here.
@@ -134,11 +136,27 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                     return;
                 }
             };
+            // Returning to login = forget the (dead) token and flip the app to
+            // unauthenticated, so the `<Show>` above swaps in `LoginScreen`. The
+            // `session` signal is owned by `App`, so setting it here is safe even
+            // as this `ChatScreen` unmounts; the loop breaks immediately after.
+            let return_to_login = move || {
+                auth::clear_token();
+                session.set(None);
+            };
             let mut backoff_ms = 500u32;
+            let mut reject_streak = 0u32;
             while !cancelled.load(Ordering::Relaxed) {
-                match transport::connect(&ws_url, &token, ui_tx.clone()) {
+                // Layer 1 (pre-emptive): never present a token we can already see
+                // is expired — drop straight to login instead of a doomed connect.
+                if auth::token_is_expired(&token) {
+                    return_to_login();
+                    break;
+                }
+                let outcome = match transport::connect(&ws_url, &token, ui_tx.clone()).await {
                     Ok(conn) => {
-                        backoff_ms = 500;
+                        // The upgrade opened: the token was accepted and a real
+                        // session begins. Run it to completion (socket drop).
                         engine.borrow_mut().set_transport(conn.transport.clone());
                         engine.borrow().start_initial_load();
                         let _ = conn.closed.await;
@@ -146,9 +164,32 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                         if cancelled.load(Ordering::Relaxed) {
                             break;
                         }
+                        AttemptOutcome::Opened
                     }
-                    Err(e) => {
+                    // Refused before opening: an auth-rejection candidate. Stay
+                    // quiet (no per-attempt error toast) and let the streak decide.
+                    Err(ConnectError::RejectedUpgrade) => AttemptOutcome::RejectedBeforeOpen,
+                    // Still connecting past the cap: a connectivity stall — retry.
+                    Err(ConnectError::Unreachable) => AttemptOutcome::NetworkError,
+                    // Couldn't even build the socket: surface it once, then retry.
+                    Err(ConnectError::Construct(e)) => {
                         let _ = ui_tx.unbounded_send(UiMessage::Error(format!("connect: {e}")));
+                        AttemptOutcome::NetworkError
+                    }
+                };
+
+                // Layer 2 (reactive): fold the outcome into the reject streak. A
+                // healthy session resets it (and the backoff); repeated
+                // refuse-before-open with no working session between drops to
+                // login; a network stall just keeps retrying, forever, as before.
+                let (next_streak, action) = reauth::on_attempt(reject_streak, outcome);
+                reject_streak = next_streak;
+                match action {
+                    ReconnectAction::Reconnect => backoff_ms = 500,
+                    ReconnectAction::Retry => {}
+                    ReconnectAction::ReturnToLogin => {
+                        return_to_login();
+                        break;
                     }
                 }
                 gloo_timers::future::TimeoutFuture::new(backoff_ms).await;
