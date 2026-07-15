@@ -25,6 +25,11 @@ client-ui-common = { path = "../../../client-ui-common" }
 desktop-assistant-api-model = { path = "../../../desktop-assistant/crates/api-model" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Base64url decode of the session JWT's payload so the SPA can read its `exp`
+# claim (verification-free) and drop to login pre-emptively rather than retry-
+# spam a doomed `/ws` upgrade (issue #42). Pure and both-target so the decode is
+# host-testable in `src/reauth.rs`. Already in the resolved graph (no new crate).
+base64 = "0.22"
 # Async primitives (oneshot + combinators) used by the transport's request/reply
 # correlation. Kept on *both* targets so the timer-agnostic reply-timeout core
 # (`src/reply.rs`) compiles and unit-tests on the host, like `wire`/`model`.
@@ -41,6 +46,10 @@ gloo-storage = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+# `js_sys::Date::now()` for the browser wall clock the pre-emptive expiry check
+# compares `exp` against (issue #42). Already a transitive dep of web-sys/
+# wasm-bindgen — no new crate in the graph.
+js-sys = "0.3"
 console_error_panic_hook = "0.1"
 # `SpeechSynthesis` + `SpeechSynthesisUtterance` back the browser read-aloud
 # (issue #18); they only add API surface to the existing web-sys dep (no new
