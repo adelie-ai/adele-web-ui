@@ -73,6 +73,15 @@ pub struct BffConfig {
     /// JWT `aud` for browser session tokens. `None`/empty ⇒ `"<user>.adelie-ai"`
     /// (mirrors the daemon's `[ws_auth.hs256].audience`).
     pub audience: Option<String>,
+    /// HS256 signing key for the browser session tokens the BFF mints
+    /// (`ADELE_WEB_UI_SIGNING_KEY`). When set (e.g. mounted from a k8s Secret)
+    /// it is used directly, so the key is **stable across restarts/redeploys** —
+    /// otherwise a random key is generated on disk per process, and every k8s
+    /// deploy would then invalidate every outstanding browser token.
+    pub signing_key: Option<String>,
+    /// Browser session-token lifetime in seconds (`ADELE_WEB_UI_TOKEN_TTL_SECS`).
+    /// `None`/absent ⇒ `auth::DEFAULT_TOKEN_TTL_SECS` (7 days).
+    pub token_ttl_secs: Option<u64>,
 }
 
 impl Default for BffConfig {
@@ -93,6 +102,8 @@ impl Default for BffConfig {
             uds_socket: None,
             issuer: None,
             audience: None,
+            signing_key: None,
+            token_ttl_secs: None,
         }
     }
 }
@@ -238,6 +249,17 @@ impl BffConfig {
         if let Some(v) = s("ADELE_WEB_UI_DAEMON_WS_JWT") {
             self.daemon_ws_jwt = Some(v);
         }
+        if let Some(v) = s("ADELE_WEB_UI_SIGNING_KEY") {
+            self.signing_key = Some(v);
+        }
+        if let Some(v) = s("ADELE_WEB_UI_TOKEN_TTL_SECS") {
+            match v.parse::<u64>() {
+                Ok(secs) => self.token_ttl_secs = Some(secs),
+                Err(_) => tracing::warn!(
+                    "invalid ADELE_WEB_UI_TOKEN_TTL_SECS (want a positive integer); keeping current"
+                ),
+            }
+        }
     }
 
     /// Load from `path`, falling back to defaults when the file is absent.
@@ -320,6 +342,26 @@ mod tests {
         assert_eq!(cfg.daemon_ws_username.as_deref(), Some("adele"));
         assert_eq!(cfg.daemon_ws_password.as_deref(), Some("s3cret"));
         assert_eq!(cfg.web_dir(), PathBuf::from("/srv/web"));
+    }
+
+    #[test]
+    fn env_overrides_signing_key_and_token_ttl() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut cfg = BffConfig::default();
+        cfg.apply_overrides_from(env(&[
+            ("ADELE_WEB_UI_SIGNING_KEY", key),
+            ("ADELE_WEB_UI_TOKEN_TTL_SECS", "604800"),
+        ]));
+        // A configured key makes the signing key stable across restarts/redeploys.
+        assert_eq!(cfg.signing_key.as_deref(), Some(key));
+        assert_eq!(cfg.token_ttl_secs, Some(604_800));
+    }
+
+    #[test]
+    fn invalid_token_ttl_is_ignored() {
+        let mut cfg = BffConfig::default();
+        cfg.apply_overrides_from(env(&[("ADELE_WEB_UI_TOKEN_TTL_SECS", "not-a-number")]));
+        assert_eq!(cfg.token_ttl_secs, None);
     }
 
     #[test]

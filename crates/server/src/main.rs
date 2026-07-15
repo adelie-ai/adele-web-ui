@@ -26,7 +26,7 @@ use desktop_assistant_client_common::{ConnectionConfig, Connector, TransportMode
 use desktop_assistant_ws::{WsAuthValidator, WsLoginService, WsServeConfig};
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::auth::{JwtValidator, PasswordLogin};
+use crate::auth::{DEFAULT_TOKEN_TTL_SECS, JwtValidator, PasswordLogin};
 use crate::config::{BffConfig, DaemonTransport};
 use crate::forward::ForwardingHandler;
 
@@ -50,9 +50,19 @@ async fn main() -> anyhow::Result<()> {
     }
     let bind = config.socket_addr()?;
 
-    // Shared HS256 signing key (the daemon's), for browser session tokens.
-    let signing_key = ensure_signing_key_at(&default_signing_key_path())
-        .context("loading/creating the JWT signing key")?;
+    // HS256 signing key for the browser session tokens the BFF mints. A
+    // configured key (ADELE_WEB_UI_SIGNING_KEY, e.g. mounted from a k8s Secret)
+    // is used directly so it's stable across restarts/redeploys; otherwise fall
+    // back to a per-process key generated on disk (fine locally, but every k8s
+    // deploy would otherwise invalidate every live browser token).
+    let signing_key = match config.signing_key.as_deref().map(str::trim) {
+        Some(k) if !k.is_empty() => {
+            tracing::info!("using a configured signing key (stable across restarts)");
+            k.to_string()
+        }
+        _ => ensure_signing_key_at(&default_signing_key_path())
+            .context("loading/creating the JWT signing key")?,
+    };
 
     // Back door: a long-lived Connector to the daemon. Two ways in:
     //  * UDS (default) — a co-located daemon authenticates this process by kernel
@@ -212,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
             signing_key.clone(),
             issuer.clone(),
             audience.clone(),
+            config.token_ttl_secs.unwrap_or(DEFAULT_TOKEN_TTL_SECS),
         )) as Arc<dyn WsLoginService>
     });
     if login.is_none() {
