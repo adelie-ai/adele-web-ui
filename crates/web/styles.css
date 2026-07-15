@@ -595,6 +595,122 @@ button {
   flex: 1;
 }
 
+/* --- Conversation rename + archive actions (issue #49) --------------------- */
+
+/* Shared look for the switcher's small text buttons (rename editor, delete
+   confirm, unarchive). Base was previously unstyled; this keeps them consistent
+   and thumb-sized. */
+.conv-btn {
+  min-height: 44px;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--bubble-assistant);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.conv-btn.accent {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.conv-btn.danger {
+  color: var(--accent-fg);
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.conv-btn:active {
+  opacity: 0.9;
+}
+
+/* Trailing per-row action icons. Slightly smaller glyph than the base
+   .icon-btn so three actions + the title fit a phone-width row; the touch
+   target stays >=44px via .icon-btn's min sizing. */
+.conv-rename-btn,
+.conv-archive {
+  flex: none;
+  font-size: 16px;
+}
+
+/* Inline rename editor, replacing the row in place (like .conv-confirm). */
+.conv-rename {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+}
+
+.conv-rename-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 16px; /* >=16px: stops iOS Safari zoom-on-focus */
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.conv-rename-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.conv-rename-actions .conv-btn {
+  flex: 1;
+}
+
+/* Archived disclosure at the foot of the drawer. */
+.conv-archived {
+  flex: none;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.conv-archived-toggle {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 6px;
+  font-weight: 600;
+  text-align: left;
+  color: var(--muted);
+  background: none;
+  border: none;
+}
+
+/* Its own scroll container so a long archived list never scrolls the page. */
+.conv-archived-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.conv-archived-list > .empty {
+  padding: 8px 4px;
+}
+
+/* An archived row: an informational (non-tappable) title block + Unarchive. */
+.conv-item.archived {
+  opacity: 0.85;
+}
+
+.conv-row-static {
+  cursor: default;
+}
+
+.conv-unarchive {
+  flex: none;
+}
+
 @keyframes drawer-in {
   from {
     transform: translateX(-100%);

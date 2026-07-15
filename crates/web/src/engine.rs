@@ -41,6 +41,14 @@ pub type ActionDone = Rc<dyn Fn(Result<(), String>)>;
 /// `Err(reason)`. The connections panel renders it as an inline result line.
 pub type ModelsRefreshed = Rc<dyn Fn(Result<usize, String>)>;
 
+/// A one-shot delivery of a fetched archived-conversation list to the switcher's
+/// local signal (issue #49). The archived list is a *view-only* concern the
+/// shared reducer deliberately does not model — surfacing it through the reducer
+/// would leak archived rows into the default list — so the engine hands it back
+/// via this callback instead. `Rc<dyn Fn>` because the engine is `!Send` /
+/// single-threaded, matching [`ModelsRefreshed`].
+pub type ArchivedLoaded = Rc<dyn Fn(Vec<ConversationSummary>)>;
+
 /// Reactive mirrors of the `WindowState` slices the UI renders. Every field is a
 /// `Copy` signal, so `ViewSignals` is `Copy` and drops cheaply into closures and
 /// spawned tasks.
@@ -367,6 +375,147 @@ impl Engine {
                         tx.unbounded_send(UiMessage::Error(format!("delete conversation: {e}")));
                 }
             }
+        });
+    }
+
+    // --- Conversation management (issue #49) ---------------------------------
+    //
+    // Rename + archive/unarchive for the switcher, layered over the same
+    // conversation plumbing as select/new/delete and reusing the shared reducer
+    // where it already models the mutation. Each is gated on a live connection
+    // (dropped silently when offline, like `delete_conversation`), with a
+    // transport fault surfaced as an error toast.
+
+    /// Rename conversation `id` to `title`. On the daemon's ack, feed
+    /// `ConversationRenamed` so the reducer patches the sidebar row; when `id`
+    /// is the *open* conversation, also re-fetch it (delivered as
+    /// `ConversationReloaded`) so the header title — derived from the open
+    /// detail, not the summary list — reflects the change too. `title` is the
+    /// already-validated new name (see `conversation_manage::effective_rename`).
+    pub fn rename_conversation(&self, id: String, title: String) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        // Capture "is this the open conversation?" before the await — the
+        // borrow of `self.state` can't cross the spawned task boundary.
+        let is_current = self.state.current_conversation_id.as_deref() == Some(id.as_str());
+        let tx = self.ui_tx.clone();
+        spawn_local(async move {
+            match transport
+                .send_command(Command::RenameConversation {
+                    id: id.clone(),
+                    title: title.clone(),
+                })
+                .await
+            {
+                Ok(CommandResult::Ack) => {
+                    let _ = tx.unbounded_send(UiMessage::ConversationRenamed {
+                        id: id.clone(),
+                        title,
+                    });
+                    if is_current {
+                        // Persist the rename into the open detail via a re-fetch,
+                        // so the header updates. `ConversationReloaded` refreshes
+                        // the cached detail without disturbing the model picker.
+                        if let Ok(CommandResult::Conversation(view)) = transport
+                            .send_command(Command::GetConversation { id })
+                            .await
+                        {
+                            let _ = tx.unbounded_send(UiMessage::ConversationReloaded(view.into()));
+                        }
+                    }
+                }
+                Ok(other) => {
+                    let _ = tx.unbounded_send(unexpected("RenameConversation", &other));
+                }
+                Err(e) => {
+                    let _ =
+                        tx.unbounded_send(UiMessage::Error(format!("rename conversation: {e}")));
+                }
+            }
+        });
+    }
+
+    /// Archive conversation `id`. On the ack, feed `ConversationDeleted`: the
+    /// reducer drops the row from the default (non-archived) list and, when the
+    /// archived conversation was the open one, clears the chat and re-homes to
+    /// another (or a fresh) conversation via `EnsureActiveConversation`. The
+    /// conversation is NOT deleted server-side — `include_archived` still lists
+    /// it and [`Self::unarchive_conversation`] restores it — so reusing the
+    /// `ConversationDeleted` path (which prunes the row + re-homes the view) is
+    /// exactly the right default-list behaviour without a new reducer message.
+    pub fn archive_conversation(&self, id: String) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let tx = self.ui_tx.clone();
+        spawn_local(async move {
+            match transport
+                .send_command(Command::ArchiveConversation { id: id.clone() })
+                .await
+            {
+                Ok(CommandResult::Ack) => {
+                    let _ = tx.unbounded_send(UiMessage::ConversationDeleted { id });
+                }
+                Ok(other) => {
+                    let _ = tx.unbounded_send(unexpected("ArchiveConversation", &other));
+                }
+                Err(e) => {
+                    let _ =
+                        tx.unbounded_send(UiMessage::Error(format!("archive conversation: {e}")));
+                }
+            }
+        });
+    }
+
+    /// Unarchive conversation `id`, restoring it to the default list. On the
+    /// ack, re-fetch the default list (delivered as `ConversationListRefetched`,
+    /// so the restored row reappears in the sidebar) and re-fetch the archived
+    /// list into `on_loaded` (so the row leaves the archived section).
+    pub fn unarchive_conversation(&self, id: String, on_loaded: ArchivedLoaded) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let tx = self.ui_tx.clone();
+        spawn_local(async move {
+            match transport
+                .send_command(Command::UnarchiveConversation { id })
+                .await
+            {
+                Ok(CommandResult::Ack) => {
+                    // Restore into the default list (a view-only sidebar repaint,
+                    // like a live `ConversationListChanged` refetch).
+                    if let Ok(CommandResult::Conversations(convs)) =
+                        transport.send_command(list_conversations()).await
+                    {
+                        let _ = tx.unbounded_send(UiMessage::ConversationListRefetched(
+                            convs.into_iter().map(Into::into).collect(),
+                        ));
+                    }
+                    // Refresh the archived section so the restored row leaves it.
+                    deliver_archived(&transport, &on_loaded).await;
+                }
+                Ok(other) => {
+                    let _ = tx.unbounded_send(unexpected("UnarchiveConversation", &other));
+                }
+                Err(e) => {
+                    let _ =
+                        tx.unbounded_send(UiMessage::Error(format!("unarchive conversation: {e}")));
+                }
+            }
+        });
+    }
+
+    /// Fetch the archived conversations on demand and deliver them to
+    /// `on_loaded` (bypassing the reducer — see [`ArchivedLoaded`]). Used to
+    /// populate the switcher's archived section when it is expanded. Silent when
+    /// offline or on a transport/shape error (the section just stays empty).
+    pub fn fetch_archived_conversations(&self, on_loaded: ArchivedLoaded) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        spawn_local(async move {
+            deliver_archived(&transport, &on_loaded).await;
         });
     }
 
@@ -1283,6 +1432,25 @@ fn list_conversations() -> Command {
     Command::ListConversations {
         max_age_days: None,
         include_archived: false,
+    }
+}
+
+/// Fetch the archived conversations (an `include_archived: true` list — which
+/// returns active AND archived — filtered to the archived ones) and hand them to
+/// `on_loaded` (issue #49). Shared by [`Engine::fetch_archived_conversations`]
+/// and the post-unarchive refresh. Silently leaves the section unchanged on a
+/// transport/shape error, mirroring `spawn_refetch_list`.
+async fn deliver_archived(transport: &Rc<Transport>, on_loaded: &ArchivedLoaded) {
+    if let Ok(CommandResult::Conversations(convs)) = transport
+        .send_command(Command::ListConversations {
+            max_age_days: None,
+            include_archived: true,
+        })
+        .await
+    {
+        let archived =
+            crate::conversation_manage::archived_only(convs.into_iter().map(Into::into).collect());
+        on_loaded(archived);
     }
 }
 
