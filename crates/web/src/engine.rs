@@ -230,13 +230,16 @@ pub struct ViewSignals {
     // --- Tool activity (issue #59) -------------------------------------------
     /// Per-device opt-in: when true, the transcript interleaves the active
     /// conversation's tool results (from `tool_activity`) as collapsed rows.
-    /// Persisted in localStorage; default off. Tool results are stripped from the
-    /// default `GetConversation` snapshot by the BFF (#58), so they reach the SPA
-    /// only through the separate fetch this gates.
+    /// Persisted in localStorage; default off. Tool results are absent from the
+    /// default transcript (the reducer's `filter_messages` drops them client-side,
+    /// and the BFF also strips them from `GetConversation`, #58), so they reach the
+    /// view only through the separate fetch this gates.
     pub show_tool_activity: RwSignal<bool>,
-    /// The active conversation's tool rows (role `tool`), fetched via
-    /// `GetMessages` when `show_tool_activity` is on and merged into the
-    /// transcript by id at render time. Empty when the toggle is off.
+    /// The active conversation's full history (all roles), fetched via
+    /// `GetMessages` when `show_tool_activity` is on; the transcript interleaves
+    /// its tool rows into the live bubbles by position (see
+    /// `tool_activity::interleave_tool_rows`). Empty when the toggle is off or
+    /// between fetches.
     pub tool_activity: RwSignal<Vec<MessageView>>,
 }
 

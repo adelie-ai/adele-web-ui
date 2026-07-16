@@ -42,7 +42,8 @@ fn is_display_bubble(role: &str, content: &str) -> bool {
 /// Interleave the conversation's tool results into the live transcript.
 ///
 /// `bubbles` is the live display list (user/assistant `(role, content)` pairs,
-/// reducer-owned, rendered verbatim). `snapshot` is the full ordered history
+/// reducer-owned; empty assistant turns are dropped to match the reload filter).
+/// `snapshot` is the full ordered history
 /// (all roles) fetched via `GetMessages`. Each `tool` row in the snapshot is
 /// placed after the number of display bubbles that precede it there, then spliced
 /// into `bubbles` at that ordinal — so tool results land under the turn that ran
@@ -54,6 +55,15 @@ pub fn interleave_tool_rows(
     bubbles: Vec<(String, String)>,
     snapshot: Vec<(String, String)>,
 ) -> Vec<TranscriptItem> {
+    // Keep only display bubbles, using the SAME predicate the snapshot count
+    // uses, so a display bubble at ordinal k in the snapshot maps to `bubbles[k]`.
+    // A live `StreamComplete` can push an empty assistant bubble (an empty final
+    // reply) that a reload's `filter_messages` would drop; dropping it here keeps
+    // that parity and prevents a blank bubble + a one-off position skew.
+    let bubbles: Vec<(String, String)> = bubbles
+        .into_iter()
+        .filter(|(role, content)| is_display_bubble(role, content))
+        .collect();
     // tools_after[k] = tool results that follow exactly k display bubbles.
     let mut tools_after: Vec<Vec<String>> = vec![Vec::new(); bubbles.len() + 1];
     let mut seen = 0usize;
@@ -322,6 +332,20 @@ mod tests {
     fn bubble_roles_are_preserved() {
         let out = interleave_tool_rows(vec![p("assistant", "text")], vec![]);
         assert_eq!(out, vec![bubble("assistant", "text")]);
+    }
+
+    #[test]
+    fn empty_assistant_live_bubble_is_dropped() {
+        // A live StreamComplete can push an empty final reply; it must not render
+        // as a blank bubble (parity with the reload filter), and an empty user
+        // turn is still kept (matches the shared reducer).
+        let bubbles = vec![
+            p("user", "hi"),
+            p("assistant", "   "),
+            p("assistant", "real"),
+        ];
+        let out = interleave_tool_rows(bubbles, vec![]);
+        assert_eq!(out, vec![bubble("user", "hi"), bubble("assistant", "real")]);
     }
 
     #[test]
