@@ -42,10 +42,20 @@ impl ForwardingHandler {
 #[async_trait::async_trait]
 impl AssistantApiHandler for ForwardingHandler {
     async fn handle_command(&self, cmd: api::Command) -> ApiResult<api::CommandResult> {
-        self.commands()?
+        // Tool-activity messages (tool results, system prompts, empty tool-call
+        // assistant turns) are display noise and can be large; strip them from
+        // the conversation snapshot before it crosses the VPN to the browser
+        // (#58). Only GetConversation carries the full transcript; every other
+        // command — including GetMessages, which the Phase-2 opt-in verbose view
+        // fetches — passes through untouched. Compute the gate before `cmd` moves
+        // into `send_command`.
+        let is_get_conversation = matches!(cmd, api::Command::GetConversation { .. });
+        let result = self
+            .commands()?
             .send_command(cmd)
             .await
-            .map_err(|e| ApiError::Core(e.to_string()))
+            .map_err(|e| ApiError::Core(e.to_string()))?;
+        Ok(browser_conversation_result(is_get_conversation, result))
     }
 
     async fn handle_send_message(
@@ -229,12 +239,27 @@ fn project_turn_event(
     }
 }
 
+/// Is this a message a reader actually wants to see in the transcript? Matches
+/// `client-ui-common`'s default (non-debug) `filter_messages`: user turns and
+/// assistant turns that carry visible text. Tool results, system prompts, and
+/// empty tool-call-only assistant turns are display noise. Keeping the predicate
+/// identical to the shared reducer keeps the web transcript consistent with the
+/// gtk/tui clients, which drop the same set client-side (#57).
+fn is_display_message(m: &api::MessageView) -> bool {
+    match m.role.as_str() {
+        "user" => true,
+        "assistant" => !m.content.trim().is_empty(),
+        _ => false,
+    }
+}
+
 /// Strip tool-activity messages from a conversation snapshot so the browser
 /// never renders raw tool JSON on reload (#58). Conversation metadata (id,
 /// title, warnings, model/personality selection) is preserved verbatim — only
 /// the message list is narrowed to what a reader wants to see.
-fn filter_conversation_tool_activity(view: api::ConversationView) -> api::ConversationView {
-    view // stub: real filtering lands in the implementation commit
+fn filter_conversation_tool_activity(mut view: api::ConversationView) -> api::ConversationView {
+    view.messages.retain(is_display_message);
+    view
 }
 
 /// Shape a daemon `CommandResult` for the browser. Today that means stripping
@@ -357,7 +382,11 @@ mod tests {
         assert_eq!(out.warnings, input.warnings, "advisories survive filtering");
         assert_eq!(out.model_selection, input.model_selection);
         assert_eq!(out.conversation_personality, input.conversation_personality);
-        assert_eq!(roles(&out), vec!["user", "assistant"], "but tool row is gone");
+        assert_eq!(
+            roles(&out),
+            vec!["user", "assistant"],
+            "but tool row is gone"
+        );
     }
 
     #[test]
