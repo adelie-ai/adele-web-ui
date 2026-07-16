@@ -64,12 +64,16 @@ const PREVIEW_MAX_CHARS: usize = 80;
 /// output equals the default (bubbles-only) transcript.
 pub fn build_verbose_transcript(
     messages: Vec<MsgRef>,
-    _tool_rows: Vec<MsgRef>,
+    tool_rows: Vec<MsgRef>,
 ) -> Vec<TranscriptItem> {
-    // stub: classifies bubbles only; the id-merge of tool_rows lands in the
-    // implementation commit (the merge/interleave tests are red against this).
-    messages
-        .into_iter()
+    let mut all = messages;
+    all.extend(tool_rows);
+    // Stable sort by (id-empty?, id): non-empty (false) before empty (true), then
+    // lexical UUIDv7 order (chronological). Empty ids — the optimistic/streaming
+    // tail — sort last; stable, so on an id tie a message keeps its place ahead of
+    // a tool row (messages were appended first).
+    all.sort_by(|a, b| (a.id.is_empty(), &a.id).cmp(&(b.id.is_empty(), &b.id)));
+    all.into_iter()
         .filter_map(|m| classify(&m.role, &m.content))
         .collect()
 }
