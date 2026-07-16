@@ -4,34 +4,17 @@
 //!
 //! Tool results are display noise by default and are stripped server-side by the
 //! BFF (#58). When the user opts in (a per-device toggle persisted in
-//! localStorage), the SPA fetches the conversation's tool rows via the daemon's
-//! existing `GetMessages { include_roles: ["tool"] }` command and **interleaves**
-//! them into the live transcript by message id — so the user/assistant bubbles
-//! stay reducer-owned and live (cross-client sync keeps working) while historical
-//! tool results appear collapsed in their true chronological place.
+//! localStorage), the SPA fetches the conversation's **full** message history
+//! (all roles) via the daemon's existing `GetMessages` command and interleaves
+//! the tool rows into the *live* transcript.
 //!
-//! [`build_verbose_transcript`] is the whole render model: default mode passes an
-//! empty `tool_rows`, so it degrades to exactly the bubble list the transcript
-//! shows today.
-
-/// A message for transcript building: the UUIDv7 `id` (empty for an optimistic /
-/// streaming tail not yet persisted), the `role`, and the `content`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MsgRef {
-    pub id: String,
-    pub role: String,
-    pub content: String,
-}
-
-impl MsgRef {
-    pub fn new(id: impl Into<String>, role: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            role: role.into(),
-            content: content.into(),
-        }
-    }
-}
+//! Placement is **by position, not id**: live bubbles are finalized with empty
+//! ids (the reducer only reconciles real ids on reload), so a tool row is placed
+//! by how many display bubbles precede it in the fetched snapshot, then spliced
+//! into the live bubble list at that ordinal. The user/assistant bubbles stay
+//! reducer-owned and live (cross-client sync keeps working); only the historical
+//! tool results come from the snapshot. With an empty snapshot the output is
+//! exactly the live bubble list.
 
 /// One rendered row of the chat transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,55 +31,60 @@ pub enum TranscriptItem {
 /// Longest tool-result preview shown in the collapsed summary, in characters.
 const PREVIEW_MAX_CHARS: usize = 80;
 
-/// Build the transcript render model by merging the live `messages` (user /
-/// assistant bubbles, reducer-owned) with separately-fetched `tool_rows` and
-/// classifying each into a [`TranscriptItem`].
-///
-/// Merge order is by UUIDv7 `id` (chronological). Empty ids — an optimistic or
-/// still-streaming tail not yet persisted — sort **last** so the live tail stays
-/// at the bottom. The sort is stable, so same-id or same-empty entries keep their
-/// input order (`messages` before `tool_rows`).
-///
-/// Classification matches the BFF / `client-ui-common` filter for bubbles: keep
-/// `user` turns and `assistant` turns with visible text; render `tool` turns with
-/// content as collapsed [`ToolActivity`]; drop empty tool-call-only assistant
-/// turns, `system` messages, and empty tool rows. With `tool_rows` empty, the
-/// output equals the default (bubbles-only) transcript.
-pub fn build_verbose_transcript(
-    messages: Vec<MsgRef>,
-    tool_rows: Vec<MsgRef>,
-) -> Vec<TranscriptItem> {
-    let mut all = messages;
-    all.extend(tool_rows);
-    // Stable sort by (id-empty?, id): non-empty (false) before empty (true), then
-    // lexical UUIDv7 order (chronological). Empty ids — the optimistic/streaming
-    // tail — sort last; stable, so on an id tie a message keeps its place ahead of
-    // a tool row (messages were appended first).
-    all.sort_by(|a, b| (a.id.is_empty(), &a.id).cmp(&(b.id.is_empty(), &b.id)));
-    all.into_iter()
-        .filter_map(|m| classify(&m.role, &m.content))
-        .collect()
+/// Does a snapshot message count as a display bubble (so tool rows can be placed
+/// relative to it)? Matches the BFF / `client-ui-common` filter: `user` turns and
+/// `assistant` turns with visible text. Empty tool-call-only assistant turns and
+/// `system` messages are not display content.
+fn is_display_bubble(role: &str, content: &str) -> bool {
+    matches!(role, "user") || (role == "assistant" && !content.trim().is_empty())
 }
 
-/// Classify one `(role, content)` into a transcript row, or `None` when it is not
-/// display content (empty assistant turn, `system`, empty tool result).
-#[cfg_attr(not(test), allow(dead_code))]
-fn classify(role: &str, content: &str) -> Option<TranscriptItem> {
-    match role {
-        "user" => Some(TranscriptItem::Bubble {
-            role: "user".to_string(),
-            content: content.to_string(),
-        }),
-        "assistant" if !content.trim().is_empty() => Some(TranscriptItem::Bubble {
-            role: "assistant".to_string(),
-            content: content.to_string(),
-        }),
-        "tool" if !content.trim().is_empty() => Some(TranscriptItem::ToolActivity {
-            preview: tool_preview(content),
-            full: content.to_string(),
-        }),
-        _ => None,
+/// Interleave the conversation's tool results into the live transcript.
+///
+/// `bubbles` is the live display list (user/assistant `(role, content)` pairs,
+/// reducer-owned, rendered verbatim). `snapshot` is the full ordered history
+/// (all roles) fetched via `GetMessages`. Each `tool` row in the snapshot is
+/// placed after the number of display bubbles that precede it there, then spliced
+/// into `bubbles` at that ordinal — so tool results land under the turn that ran
+/// them without depending on message ids (the live bubbles have none until a
+/// reload). `system` and empty tool-call-only assistant snapshot rows are skipped
+/// for counting and never rendered; empty tool rows are dropped. With `snapshot`
+/// empty (the toggle off, or nothing fetched yet) the result is exactly `bubbles`.
+pub fn interleave_tool_rows(
+    bubbles: Vec<(String, String)>,
+    snapshot: Vec<(String, String)>,
+) -> Vec<TranscriptItem> {
+    // tools_after[k] = tool results that follow exactly k display bubbles.
+    let mut tools_after: Vec<Vec<String>> = vec![Vec::new(); bubbles.len() + 1];
+    let mut seen = 0usize;
+    for (role, content) in &snapshot {
+        if is_display_bubble(role, content) {
+            seen += 1;
+        } else if role == "tool" && !content.trim().is_empty() {
+            // Clamp so a tool row past the live tail (e.g. the snapshot is a turn
+            // ahead of the not-yet-updated bubbles) renders at the end rather than
+            // out of bounds.
+            let k = seen.min(bubbles.len());
+            tools_after[k].push(content.clone());
+        }
     }
+
+    let mut out = Vec::with_capacity(bubbles.len());
+    for (k, tools) in tools_after.iter().enumerate() {
+        for t in tools {
+            out.push(TranscriptItem::ToolActivity {
+                preview: tool_preview(t),
+                full: t.clone(),
+            });
+        }
+        if let Some((role, content)) = bubbles.get(k) {
+            out.push(TranscriptItem::Bubble {
+                role: role.clone(),
+                content: content.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// A compact, single-line preview of a tool result for the collapsed summary:
@@ -132,9 +120,9 @@ fn persist_toggle(on: bool) {
     let _ = LocalStorage::set(TOGGLE_KEY, on);
 }
 
-/// Header toggle for the "show tool activity" view (#59): flips the per-device
-/// signal and persists it. The transcript re-derives reactively; a watching
-/// effect in `app` fetches the rows when it turns on.
+/// Header toggle for the "show tool activity" view: flips the per-device signal
+/// and persists it. The transcript re-derives reactively; a watching effect in
+/// `app` fetches the snapshot when it turns on.
 #[cfg(target_arch = "wasm32")]
 pub fn tool_activity_toggle(view: crate::engine::ViewSignals) -> impl leptos::IntoView {
     use leptos::prelude::*;
@@ -157,30 +145,29 @@ pub fn tool_activity_toggle(view: crate::engine::ViewSignals) -> impl leptos::In
     }
 }
 
-/// The chat transcript rows: user/assistant bubbles, with tool results
-/// interleaved as collapsed `<details>` when the opt-in is on. Shares one render
-/// model with the default view via [`build_verbose_transcript`] — with the toggle
-/// off, `tool_rows` is empty and this is exactly the bubble list.
+/// The chat transcript rows: live user/assistant bubbles, with tool results
+/// interleaved as collapsed `<details>` when the opt-in is on. With the toggle
+/// off the snapshot is empty and this is exactly the live bubble list.
 #[cfg(target_arch = "wasm32")]
 pub fn transcript_view(view: crate::engine::ViewSignals) -> impl leptos::IntoView {
     use leptos::prelude::*;
     move || {
-        let messages: Vec<MsgRef> = view
+        let bubbles: Vec<(String, String)> = view
             .messages
             .get()
-            .iter()
-            .map(|m| MsgRef::new(m.id.clone(), m.role.clone(), m.content.clone()))
+            .into_iter()
+            .map(|m| (m.role, m.content))
             .collect();
-        let tool_rows: Vec<MsgRef> = if view.show_tool_activity.get() {
+        let snapshot: Vec<(String, String)> = if view.show_tool_activity.get() {
             view.tool_activity
                 .get()
-                .iter()
-                .map(|m| MsgRef::new(m.id.clone(), m.role.clone(), m.content.clone()))
+                .into_iter()
+                .map(|m| (m.role, m.content))
                 .collect()
         } else {
             Vec::new()
         };
-        build_verbose_transcript(messages, tool_rows)
+        interleave_tool_rows(bubbles, snapshot)
             .into_iter()
             .map(|item| match item {
                 TranscriptItem::Bubble { role, content } => view! {
@@ -208,6 +195,10 @@ pub fn transcript_view(view: crate::engine::ViewSignals) -> impl leptos::IntoVie
 mod tests {
     use super::*;
 
+    fn p(role: &str, content: &str) -> (String, String) {
+        (role.to_string(), content.to_string())
+    }
+
     fn bubble(role: &str, content: &str) -> TranscriptItem {
         TranscriptItem::Bubble {
             role: role.to_string(),
@@ -226,12 +217,9 @@ mod tests {
     }
 
     #[test]
-    fn bubbles_only_when_no_tool_rows() {
-        let messages = vec![
-            MsgRef::new("1", "user", "drive?"),
-            MsgRef::new("2", "assistant", "~40h"),
-        ];
-        let out = build_verbose_transcript(messages, vec![]);
+    fn empty_snapshot_is_just_the_live_bubbles() {
+        let bubbles = vec![p("user", "drive?"), p("assistant", "~40h")];
+        let out = interleave_tool_rows(bubbles, vec![]);
         assert_eq!(
             out,
             vec![bubble("user", "drive?"), bubble("assistant", "~40h")]
@@ -239,14 +227,16 @@ mod tests {
     }
 
     #[test]
-    fn interleaves_tool_rows_by_id() {
-        // ids sort id1 < id2 < id3, so the tool row lands between the bubbles.
-        let messages = vec![
-            MsgRef::new("id1", "user", "drive?"),
-            MsgRef::new("id3", "assistant", "~40h"),
+    fn tool_placed_after_its_turn() {
+        // Snapshot: user, empty tool-call assistant (dropped), tool, final answer.
+        let bubbles = vec![p("user", "drive?"), p("assistant", "~40h")];
+        let snapshot = vec![
+            p("user", "drive?"),
+            p("assistant", "   "),
+            p("tool", r#"{"distance_m":4300000}"#),
+            p("assistant", "~40h"),
         ];
-        let tool_rows = vec![MsgRef::new("id2", "tool", r#"{"distance_m":4300000}"#)];
-        let out = build_verbose_transcript(messages, tool_rows);
+        let out = interleave_tool_rows(bubbles, snapshot);
         assert_eq!(kinds(&out), vec!["bubble", "tool", "bubble"]);
         assert_eq!(out[0], bubble("user", "drive?"));
         assert_eq!(out[2], bubble("assistant", "~40h"));
@@ -260,14 +250,52 @@ mod tests {
     }
 
     #[test]
-    fn drops_empty_assistant_and_system() {
-        let messages = vec![
-            MsgRef::new("0", "system", "You are Adele."),
-            MsgRef::new("1", "user", "hi"),
-            MsgRef::new("2", "assistant", "   "),
-            MsgRef::new("3", "assistant", "hello"),
+    fn multiple_tools_across_multiple_turns() {
+        let bubbles = vec![
+            p("user", "q1"),
+            p("assistant", "a1"),
+            p("user", "q2"),
+            p("assistant", "a2"),
         ];
-        let out = build_verbose_transcript(messages, vec![]);
+        let snapshot = vec![
+            p("user", "q1"),
+            p("tool", "t1"),
+            p("assistant", "a1"),
+            p("user", "q2"),
+            p("tool", "t2"),
+            p("assistant", "a2"),
+        ];
+        let out = interleave_tool_rows(bubbles, snapshot);
+        assert_eq!(
+            kinds(&out),
+            vec!["bubble", "tool", "bubble", "bubble", "tool", "bubble"]
+        );
+        // Each tool sits under the turn that ran it, not clustered at the top —
+        // the exact failure the id-merge approach had with empty-id live bubbles.
+        assert_eq!(out[0], bubble("user", "q1"));
+        assert_eq!(out[2], bubble("assistant", "a1"));
+        assert_eq!(out[3], bubble("user", "q2"));
+        assert_eq!(out[5], bubble("assistant", "a2"));
+    }
+
+    #[test]
+    fn tool_before_any_bubble_renders_first() {
+        let bubbles = vec![p("user", "q")];
+        let snapshot = vec![p("tool", "early"), p("user", "q")];
+        let out = interleave_tool_rows(bubbles, snapshot);
+        assert_eq!(kinds(&out), vec!["tool", "bubble"]);
+    }
+
+    #[test]
+    fn system_and_empty_tool_rows_are_skipped() {
+        let bubbles = vec![p("user", "hi"), p("assistant", "hello")];
+        let snapshot = vec![
+            p("system", "You are Adele."),
+            p("user", "hi"),
+            p("tool", "   "),
+            p("assistant", "hello"),
+        ];
+        let out = interleave_tool_rows(bubbles, snapshot);
         assert_eq!(
             out,
             vec![bubble("user", "hi"), bubble("assistant", "hello")]
@@ -275,45 +303,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_tool_content_is_not_shown() {
-        let messages = vec![MsgRef::new("1", "user", "hi")];
-        let tool_rows = vec![MsgRef::new("2", "tool", "   ")];
-        let out = build_verbose_transcript(messages, tool_rows);
-        assert_eq!(out, vec![bubble("user", "hi")]);
-    }
-
-    #[test]
-    fn optimistic_empty_id_message_sorts_last() {
-        // A just-sent user turn has no persisted id yet; it must stay at the
-        // bottom even though a real-id tool row exists.
-        let messages = vec![
-            MsgRef::new("id1", "user", "first"),
-            MsgRef::new("", "user", "just typed"),
-        ];
-        let tool_rows = vec![MsgRef::new("id2", "tool", "a-result")];
-        let out = build_verbose_transcript(messages, tool_rows);
-        assert_eq!(kinds(&out), vec!["bubble", "tool", "bubble"]);
-        assert_eq!(out[0], bubble("user", "first"));
-        assert_eq!(
-            out[2],
-            bubble("user", "just typed"),
-            "empty-id tail stays last"
-        );
-    }
-
-    #[test]
-    fn stable_merge_keeps_message_before_tool_on_id_tie() {
-        // Degenerate equal-id case: stable order keeps the message ahead of the
-        // tool row (messages are appended first).
-        let messages = vec![MsgRef::new("x", "assistant", "text")];
-        let tool_rows = vec![MsgRef::new("x", "tool", "res")];
-        let out = build_verbose_transcript(messages, tool_rows);
+    fn tool_past_live_tail_clamps_to_end() {
+        // The snapshot is a turn ahead of the not-yet-updated live bubbles: the
+        // new tool row renders at the end rather than being dropped or panicking.
+        let bubbles = vec![p("user", "q1")];
+        let snapshot = vec![p("user", "q1"), p("assistant", "a1"), p("tool", "t1")];
+        let out = interleave_tool_rows(bubbles, snapshot);
         assert_eq!(kinds(&out), vec!["bubble", "tool"]);
     }
 
     #[test]
-    fn empty_inputs_are_empty() {
-        assert!(build_verbose_transcript(vec![], vec![]).is_empty());
+    fn no_bubbles_still_renders_orphan_tool() {
+        let out = interleave_tool_rows(vec![], vec![p("tool", "t")]);
+        assert_eq!(kinds(&out), vec!["tool"]);
+    }
+
+    #[test]
+    fn bubble_roles_are_preserved() {
+        let out = interleave_tool_rows(vec![p("assistant", "text")], vec![]);
+        assert_eq!(out, vec![bubble("assistant", "text")]);
     }
 
     #[test]
@@ -326,6 +334,16 @@ mod tests {
         );
         assert!(p.ends_with("..."), "truncated with plain-ascii ellipsis");
         assert_eq!(p.chars().count(), PREVIEW_MAX_CHARS + 3, "capped + '...'");
+    }
+
+    #[test]
+    fn preview_at_exact_cap_is_not_truncated() {
+        let exact = "x".repeat(PREVIEW_MAX_CHARS);
+        assert_eq!(
+            tool_preview(&exact),
+            exact,
+            "== cap is verbatim, no ellipsis"
+        );
     }
 
     #[test]

@@ -225,18 +225,39 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
     // tasks and top-level event handlers, which don't require `Send`).
     let engine_handle: settings::EngineHandle = StoredValue::new_local(engine.clone());
 
-    // Fetch tool activity whenever the opt-in is on and the conversation or the
-    // last completed turn changes (#59). Gated on the toggle so it's zero work
-    // when off; `refresh_tool_activity` no-ops without a live transport. Reading
-    // `last_completed_reply` re-runs this after each turn so freshly-run tools
-    // appear without a manual refresh.
+    // Fetch the tool-activity snapshot when the opt-in is on (#59), deduped so a
+    // streamed turn doesn't spam GetMessages: `sync_view` re-sets
+    // `current_conversation_id` on every dispatch (including every delta) with no
+    // PartialEq guard, so we gate on a Memo whose value only changes on a real
+    // switch, a new message (send / turn completion → `messages` grows), or a
+    // toggle. The snapshot is cleared on switch/off so a slow fetch never renders
+    // the previous conversation's tool output; `refresh_tool_activity` also drops
+    // a reply that arrives after a switch.
+    let tool_activity_trigger = Memo::new(move |_| {
+        (
+            view.show_tool_activity.get(),
+            view.current_conversation_id.get(),
+            view.messages.with(Vec::len),
+        )
+    });
+    let last_tool_activity_cid = StoredValue::new_local(None::<String>);
     Effect::new(move |_| {
-        let on = view.show_tool_activity.get();
-        let cid = view.current_conversation_id.get();
-        let _ = view.last_completed_reply.get();
-        if on && let Some(id) = cid {
-            engine_handle.with_value(|e| e.borrow().refresh_tool_activity(id));
+        let (on, cid, _len) = tool_activity_trigger.get();
+        if !on {
+            engine_handle.with_value(|e| e.borrow().clear_tool_activity());
+            last_tool_activity_cid.set_value(None);
+            return;
         }
+        let Some(id) = cid else { return };
+        let switched = last_tool_activity_cid.get_value().as_deref() != Some(id.as_str());
+        last_tool_activity_cid.set_value(Some(id.clone()));
+        engine_handle.with_value(|e| {
+            let e = e.borrow();
+            if switched {
+                e.clear_tool_activity();
+            }
+            e.refresh_tool_activity(id);
+        });
     });
 
     // Conversation switcher drawer (issue #12): `false` = closed. The list now

@@ -1598,13 +1598,21 @@ impl Engine {
 
     // --- Tool activity (issue #59) -------------------------------------------
 
-    /// Fetch the active conversation's tool rows for the "show tool activity"
-    /// view. Issues `GetMessages { include_roles: ["tool"] }` — which the BFF
-    /// forwards untouched — and mirrors the rows into `tool_activity`, where the
-    /// transcript merges them in by id. `tail = 0, after_count = -1` means "all
-    /// messages of the requested roles". A missing transport (between
-    /// connections) or a non-matching reply drops the refresh, leaving the last
-    /// rows intact rather than flickering the transcript.
+    /// Clear the tool-activity snapshot (on a conversation switch or when the
+    /// toggle turns off) so a slow in-flight fetch can't render the previous
+    /// conversation's tool output against the new transcript.
+    pub fn clear_tool_activity(&self) {
+        self.view.tool_activity.set(Vec::new());
+    }
+
+    /// Fetch the active conversation's full history for the "show tool activity"
+    /// view. Issues `GetMessages { include_roles: [] }` (all roles) — which the
+    /// BFF forwards untouched — and mirrors it into `tool_activity`, where the
+    /// transcript interleaves the tool rows into the live bubbles by position.
+    /// `tail = 0, after_count = -1` means "every message". The reply is applied
+    /// only if this conversation is still the open one, so a switch mid-fetch
+    /// can't bleed one conversation's tool output into another. A missing
+    /// transport (between connections) or a non-matching reply drops the refresh.
     pub fn refresh_tool_activity(&self, conversation_id: String) {
         let Some(transport) = self.transport.clone() else {
             return;
@@ -1613,12 +1621,18 @@ impl Engine {
         spawn_local(async move {
             let reply = transport
                 .send_command(Command::GetMessages {
-                    conversation_id,
+                    conversation_id: conversation_id.clone(),
                     tail: 0,
                     after_count: -1,
-                    include_roles: vec!["tool".to_string()],
+                    include_roles: Vec::new(),
                 })
                 .await;
+            // Drop the result if the user has since switched conversations.
+            if view.current_conversation_id.get_untracked().as_deref()
+                != Some(conversation_id.as_str())
+            {
+                return;
+            }
             if let Ok(CommandResult::Messages(mv)) = reply {
                 view.tool_activity.set(mv.messages);
             }
