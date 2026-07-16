@@ -42,10 +42,20 @@ impl ForwardingHandler {
 #[async_trait::async_trait]
 impl AssistantApiHandler for ForwardingHandler {
     async fn handle_command(&self, cmd: api::Command) -> ApiResult<api::CommandResult> {
-        self.commands()?
+        // Tool-activity messages (tool results, system prompts, empty tool-call
+        // assistant turns) are display noise and can be large; strip them from
+        // the conversation snapshot before it crosses the VPN to the browser
+        // (#58). Only GetConversation carries the full transcript; every other
+        // command — including GetMessages, which the Phase-2 opt-in verbose view
+        // fetches — passes through untouched. Compute the gate before `cmd` moves
+        // into `send_command`.
+        let is_get_conversation = matches!(cmd, api::Command::GetConversation { .. });
+        let result = self
+            .commands()?
             .send_command(cmd)
             .await
-            .map_err(|e| ApiError::Core(e.to_string()))
+            .map_err(|e| ApiError::Core(e.to_string()))?;
+        Ok(browser_conversation_result(is_get_conversation, result))
     }
 
     async fn handle_send_message(
@@ -229,12 +239,193 @@ fn project_turn_event(
     }
 }
 
+/// Is this a message a reader actually wants to see in the transcript? Matches
+/// `client-ui-common`'s default (non-debug) `filter_messages`: user turns and
+/// assistant turns that carry visible text. Tool results, system prompts, and
+/// empty tool-call-only assistant turns are display noise. Keeping the predicate
+/// identical to the shared reducer keeps the web transcript consistent with the
+/// gtk/tui clients, which drop the same set client-side (#57).
+fn is_display_message(m: &api::MessageView) -> bool {
+    match m.role.as_str() {
+        "user" => true,
+        "assistant" => !m.content.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// Strip tool-activity messages from a conversation snapshot so the browser
+/// never renders raw tool JSON on reload (#58). Conversation metadata (id,
+/// title, warnings, model/personality selection) is preserved verbatim — only
+/// the message list is narrowed to what a reader wants to see.
+fn filter_conversation_tool_activity(mut view: api::ConversationView) -> api::ConversationView {
+    view.messages.retain(is_display_message);
+    view
+}
+
+/// Shape a daemon `CommandResult` for the browser. Today that means stripping
+/// tool activity from a `GetConversation` snapshot (#58); every other reply —
+/// including `GetMessages`, which the Phase-2 opt-in verbose view uses — passes
+/// through untouched. Pure, so `handle_command`'s post-processing is unit-tested
+/// without standing up a live daemon.
+fn browser_conversation_result(
+    is_get_conversation: bool,
+    result: api::CommandResult,
+) -> api::CommandResult {
+    match result {
+        api::CommandResult::Conversation(view) if is_get_conversation => {
+            api::CommandResult::Conversation(filter_conversation_tool_activity(view))
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DAEMON_RID: &str = "daemon-req-1";
     const BROWSER_RID: &str = "browser-req-1";
+
+    fn mv(role: &str, content: &str) -> api::MessageView {
+        api::MessageView {
+            id: String::new(),
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    fn conversation(messages: Vec<api::MessageView>) -> api::ConversationView {
+        api::ConversationView {
+            id: "c1".to_string(),
+            title: "Trip planning".to_string(),
+            messages,
+            warnings: Vec::new(),
+            model_selection: None,
+            conversation_personality: None,
+        }
+    }
+
+    fn roles(view: &api::ConversationView) -> Vec<&str> {
+        view.messages.iter().map(|m| m.role.as_str()).collect()
+    }
+
+    #[test]
+    fn filter_drops_tool_role_messages() {
+        let view = conversation(vec![
+            mv("user", "how long is the drive?"),
+            mv("assistant", "About 40 hours."),
+            mv("tool", r#"{"route":{"distance_m":4300000}}"#),
+        ]);
+        let out = filter_conversation_tool_activity(view);
+        assert_eq!(roles(&out), vec!["user", "assistant"], "tool row dropped");
+    }
+
+    #[test]
+    fn filter_drops_empty_tool_call_assistant_turns() {
+        // An assistant turn that only carried tool_calls has empty text content.
+        let view = conversation(vec![
+            mv("user", "plan my trip"),
+            mv("assistant", "   "),
+            mv("assistant", "Here's the plan."),
+        ]);
+        let out = filter_conversation_tool_activity(view);
+        assert_eq!(roles(&out), vec!["user", "assistant"]);
+        assert_eq!(
+            out.messages[1].content, "Here's the plan.",
+            "the visible assistant turn survives, the empty one is dropped"
+        );
+    }
+
+    #[test]
+    fn filter_keeps_empty_user_message() {
+        // The predicate keeps `user` unconditionally — an empty/whitespace user
+        // turn is still the user's turn. This pins parity with the shared
+        // reducer's `filter_messages`, which also keeps empty user messages, so a
+        // future divergence in either direction is caught.
+        let view = conversation(vec![mv("user", "   "), mv("assistant", "hi")]);
+        let out = filter_conversation_tool_activity(view);
+        assert_eq!(roles(&out), vec!["user", "assistant"]);
+    }
+
+    #[test]
+    fn filter_keeps_user_and_nonempty_assistant() {
+        let view = conversation(vec![mv("user", "hi"), mv("assistant", "hello")]);
+        let out = filter_conversation_tool_activity(view);
+        assert_eq!(roles(&out), vec!["user", "assistant"], "order preserved");
+        assert_eq!(out.messages[0].content, "hi");
+        assert_eq!(out.messages[1].content, "hello");
+    }
+
+    #[test]
+    fn filter_drops_system_messages() {
+        let view = conversation(vec![mv("system", "You are Adele."), mv("user", "hi")]);
+        let out = filter_conversation_tool_activity(view);
+        assert_eq!(roles(&out), vec!["user"], "system prompt is not display");
+    }
+
+    #[test]
+    fn filter_on_empty_conversation_is_empty() {
+        let out = filter_conversation_tool_activity(conversation(vec![]));
+        assert!(out.messages.is_empty());
+    }
+
+    #[test]
+    fn filter_preserves_conversation_metadata() {
+        let sel = api::ConversationModelSelectionView {
+            connection_id: "work".to_string(),
+            model_id: "claude".to_string(),
+            effort: Some(api::EffortLevel::High),
+        };
+        let mut view = conversation(vec![
+            mv("user", "hi"),
+            mv("tool", r#"{"noise":true}"#),
+            mv("assistant", "hello"),
+        ]);
+        view.model_selection = Some(sel.clone());
+        view.warnings = vec![api::ConversationWarning::DanglingModelSelection {
+            previous_selection: sel.clone(),
+            fallback_to: sel.clone(),
+        }];
+        let input = view.clone();
+        let out = filter_conversation_tool_activity(view);
+        assert_eq!(out.id, input.id);
+        assert_eq!(out.title, input.title);
+        assert_eq!(out.warnings, input.warnings, "advisories survive filtering");
+        assert_eq!(out.model_selection, input.model_selection);
+        assert_eq!(out.conversation_personality, input.conversation_personality);
+        assert_eq!(
+            roles(&out),
+            vec!["user", "assistant"],
+            "but tool row is gone"
+        );
+    }
+
+    #[test]
+    fn handle_command_filters_get_conversation_only() {
+        let with_tools = conversation(vec![mv("user", "hi"), mv("tool", "{}")]);
+        // GetConversation result → filtered.
+        let filtered =
+            browser_conversation_result(true, api::CommandResult::Conversation(with_tools.clone()));
+        match filtered {
+            api::CommandResult::Conversation(v) => assert_eq!(roles(&v), vec!["user"]),
+            other => panic!("expected Conversation, got {other:?}"),
+        }
+        // A Conversation from a non-GetConversation command → untouched (the gate
+        // is closed), so no reply is silently reshaped.
+        let untouched =
+            browser_conversation_result(false, api::CommandResult::Conversation(with_tools));
+        match untouched {
+            api::CommandResult::Conversation(v) => {
+                assert_eq!(roles(&v), vec!["user", "tool"], "gate closed: not filtered")
+            }
+            other => panic!("expected Conversation, got {other:?}"),
+        }
+        // A non-Conversation reply is passed straight through.
+        assert!(matches!(
+            browser_conversation_result(true, api::CommandResult::Ack),
+            api::CommandResult::Ack
+        ));
+    }
 
     fn chunk(request_id: &str) -> SignalEvent {
         SignalEvent::Chunk {
