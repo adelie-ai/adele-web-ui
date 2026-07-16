@@ -225,6 +225,20 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
     // tasks and top-level event handlers, which don't require `Send`).
     let engine_handle: settings::EngineHandle = StoredValue::new_local(engine.clone());
 
+    // Fetch tool activity whenever the opt-in is on and the conversation or the
+    // last completed turn changes (#59). Gated on the toggle so it's zero work
+    // when off; `refresh_tool_activity` no-ops without a live transport. Reading
+    // `last_completed_reply` re-runs this after each turn so freshly-run tools
+    // appear without a manual refresh.
+    Effect::new(move |_| {
+        let on = view.show_tool_activity.get();
+        let cid = view.current_conversation_id.get();
+        let _ = view.last_completed_reply.get();
+        if on && let Some(id) = cid {
+            engine_handle.with_value(|e| e.borrow().refresh_tool_activity(id));
+        }
+    });
+
     // Conversation switcher drawer (issue #12): `false` = closed. The list now
     // updates live from other-client changes (#15) — a `ConversationListChanged`
     // event drives the reducer to refetch and repaint the sidebar. This
@@ -275,6 +289,9 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                 // Read-aloud toggle (issue #18): speaks completed replies via the
                 // browser's SpeechSynthesis. Self-hiding when the API is absent.
                 {crate::read_aloud::read_aloud_toggle(view)}
+                // Show-tool-activity toggle (issue #59): reveals Adele's tool
+                // results inline (collapsed). Off by default, persisted per device.
+                {crate::tool_activity::tool_activity_toggle(view)}
                 <button class="icon-btn" aria-label="Open settings" on:click=open_settings>
                     "\u{2699}"
                 </button>
@@ -290,22 +307,9 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
             </Show>
 
             <section class="messages">
-                {move || {
-                    view.messages
-                        .get()
-                        .into_iter()
-                        .map(|m| {
-                            // Render message content as sanitized markdown (issue
-                            // #48) instead of the old escaped `<p>{content}</p>`.
-                            view! {
-                                <div class=format!(
-                                    "msg {}",
-                                    m.role,
-                                )>{crate::markdown::message_body(&m.content)}</div>
-                            }
-                        })
-                        .collect_view()
-                }}
+                // Bubbles (markdown, issue #48) with tool results interleaved as
+                // collapsed rows when the opt-in is on (issue #59).
+                {crate::tool_activity::transcript_view(view)}
                 <Show when=move || view.streaming_active.get()>
                     <div class="msg assistant streaming">
                         {crate::markdown::streaming_body(view.streaming)}

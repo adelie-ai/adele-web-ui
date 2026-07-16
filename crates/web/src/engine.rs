@@ -14,8 +14,9 @@ use std::rc::Rc;
 use desktop_assistant_api_model::client::{ChatMessage, ConversationSummary};
 use desktop_assistant_api_model::{
     Command, CommandResult, ConnectionConfigView, ConnectionView, ConversationModelSelectionView,
-    ConversationPersonalityView, EffortLevel, McpServerView, ModelListing, PurposeConfigView,
-    PurposeKindApi, PurposesView, ScratchpadNoteView, SendPromptOverride, ServiceAccountView,
+    ConversationPersonalityView, EffortLevel, McpServerView, MessageView, ModelListing,
+    PurposeConfigView, PurposeKindApi, PurposesView, ScratchpadNoteView, SendPromptOverride,
+    ServiceAccountView,
 };
 use futures::channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
@@ -226,6 +227,17 @@ pub struct ViewSignals {
     /// Reusable outbound OAuth service accounts (epic #477) for the http editor's
     /// account picker. Loaded alongside the server list.
     pub mcp_service_accounts: RwSignal<Vec<ServiceAccountView>>,
+    // --- Tool activity (issue #59) -------------------------------------------
+    /// Per-device opt-in: when true, the transcript interleaves the active
+    /// conversation's tool results (from `tool_activity`) as collapsed rows.
+    /// Persisted in localStorage; default off. Tool results are stripped from the
+    /// default `GetConversation` snapshot by the BFF (#58), so they reach the SPA
+    /// only through the separate fetch this gates.
+    pub show_tool_activity: RwSignal<bool>,
+    /// The active conversation's tool rows (role `tool`), fetched via
+    /// `GetMessages` when `show_tool_activity` is on and merged into the
+    /// transcript by id at render time. Empty when the toggle is off.
+    pub tool_activity: RwSignal<Vec<MessageView>>,
 }
 
 impl ViewSignals {
@@ -278,6 +290,8 @@ impl ViewSignals {
             mcp_loaded: RwSignal::new(false),
             mcp_error: RwSignal::new(None),
             mcp_service_accounts: RwSignal::new(Vec::new()),
+            show_tool_activity: RwSignal::new(crate::tool_activity::load_persisted_toggle()),
+            tool_activity: RwSignal::new(Vec::new()),
         }
     }
 }
@@ -1579,6 +1593,35 @@ impl Engine {
                 }
             }
             view.knowledge_busy.set(false);
+        });
+    }
+
+    // --- Tool activity (issue #59) -------------------------------------------
+
+    /// Fetch the active conversation's tool rows for the "show tool activity"
+    /// view. Issues `GetMessages { include_roles: ["tool"] }` — which the BFF
+    /// forwards untouched — and mirrors the rows into `tool_activity`, where the
+    /// transcript merges them in by id. `tail = 0, after_count = -1` means "all
+    /// messages of the requested roles". A missing transport (between
+    /// connections) or a non-matching reply drops the refresh, leaving the last
+    /// rows intact rather than flickering the transcript.
+    pub fn refresh_tool_activity(&self, conversation_id: String) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let view = self.view;
+        spawn_local(async move {
+            let reply = transport
+                .send_command(Command::GetMessages {
+                    conversation_id,
+                    tail: 0,
+                    after_count: -1,
+                    include_roles: vec!["tool".to_string()],
+                })
+                .await;
+            if let Ok(CommandResult::Messages(mv)) = reply {
+                view.tool_activity.set(mv.messages);
+            }
         });
     }
 

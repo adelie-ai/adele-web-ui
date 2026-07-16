@@ -202,6 +202,47 @@ button {
   opacity: 0.85;
 }
 
+/* Tool-activity row (issue #59): a collapsed <details> the user can expand to
+   see a tool's raw result. Full-width, muted, and visually distinct from the
+   user/assistant bubbles so it reads as machinery, not conversation. */
+.msg.tool-activity {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0;
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.msg.tool-activity > summary {
+  padding: 10px 12px;
+  min-height: 44px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.tool-activity-label {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.tool-activity-preview {
+  margin-left: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+}
+
+.tool-activity-body {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .composer {
   display: flex;
   gap: 8px;
@@ -324,6 +365,19 @@ button {
 }
 
 .read-aloud-toggle.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Show-tool-activity toggle (issue #59): reuses .icon-btn sizing (44px touch
+   target); the on-state tints it like the read-aloud toggle so it reads as
+   active at a glance. */
+.tool-activity-toggle {
+  flex: none;
+  font-size: 18px;
+}
+
+.tool-activity-toggle.active {
   color: var(--accent);
   background: var(--accent-soft);
 }

@@ -112,6 +112,98 @@ fn tool_preview(content: &str) -> String {
     }
 }
 
+// --- Persistence + Leptos views (wasm only) ----------------------------------
+
+/// localStorage key for the per-device "show tool activity" toggle.
+#[cfg(target_arch = "wasm32")]
+const TOGGLE_KEY: &str = "adele.show_tool_activity";
+
+/// Read the persisted per-device toggle. Default off — tool activity is opt-in.
+#[cfg(target_arch = "wasm32")]
+pub fn load_persisted_toggle() -> bool {
+    use gloo_storage::{LocalStorage, Storage};
+    LocalStorage::get::<bool>(TOGGLE_KEY).unwrap_or(false)
+}
+
+/// Persist the per-device toggle so it survives reloads.
+#[cfg(target_arch = "wasm32")]
+fn persist_toggle(on: bool) {
+    use gloo_storage::{LocalStorage, Storage};
+    let _ = LocalStorage::set(TOGGLE_KEY, on);
+}
+
+/// Header toggle for the "show tool activity" view (#59): flips the per-device
+/// signal and persists it. The transcript re-derives reactively; a watching
+/// effect in `app` fetches the rows when it turns on.
+#[cfg(target_arch = "wasm32")]
+pub fn tool_activity_toggle(view: crate::engine::ViewSignals) -> impl leptos::IntoView {
+    use leptos::prelude::*;
+    let on_click = move |_| {
+        let now = !view.show_tool_activity.get_untracked();
+        view.show_tool_activity.set(now);
+        persist_toggle(now);
+    };
+    view! {
+        <button
+            class="icon-btn tool-activity-toggle"
+            class:active=move || view.show_tool_activity.get()
+            aria-pressed=move || if view.show_tool_activity.get() { "true" } else { "false" }
+            aria-label="Show tool activity"
+            title="Show tool activity"
+            on:click=on_click
+        >
+            "\u{1F527}"
+        </button>
+    }
+}
+
+/// The chat transcript rows: user/assistant bubbles, with tool results
+/// interleaved as collapsed `<details>` when the opt-in is on. Shares one render
+/// model with the default view via [`build_verbose_transcript`] — with the toggle
+/// off, `tool_rows` is empty and this is exactly the bubble list.
+#[cfg(target_arch = "wasm32")]
+pub fn transcript_view(view: crate::engine::ViewSignals) -> impl leptos::IntoView {
+    use leptos::prelude::*;
+    move || {
+        let messages: Vec<MsgRef> = view
+            .messages
+            .get()
+            .iter()
+            .map(|m| MsgRef::new(m.id.clone(), m.role.clone(), m.content.clone()))
+            .collect();
+        let tool_rows: Vec<MsgRef> = if view.show_tool_activity.get() {
+            view.tool_activity
+                .get()
+                .iter()
+                .map(|m| MsgRef::new(m.id.clone(), m.role.clone(), m.content.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        build_verbose_transcript(messages, tool_rows)
+            .into_iter()
+            .map(|item| match item {
+                TranscriptItem::Bubble { role, content } => view! {
+                    <div class=format!(
+                        "msg {role}",
+                    )>{crate::markdown::message_body(&content)}</div>
+                }
+                .into_any(),
+                TranscriptItem::ToolActivity { preview, full } => view! {
+                    <details class="msg tool-activity">
+                        <summary>
+                            <span class="tool-activity-label">"Tool result"</span>
+                            <span class="tool-activity-preview">{preview}</span>
+                        </summary>
+                        <pre class="tool-activity-body">{full}</pre>
+                    </details>
+                }
+                .into_any(),
+            })
+            .collect_view()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
