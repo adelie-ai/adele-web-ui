@@ -225,6 +225,41 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
     // tasks and top-level event handlers, which don't require `Send`).
     let engine_handle: settings::EngineHandle = StoredValue::new_local(engine.clone());
 
+    // Fetch the tool-activity snapshot when the opt-in is on (#59), deduped so a
+    // streamed turn doesn't spam GetMessages: `sync_view` re-sets
+    // `current_conversation_id` on every dispatch (including every delta) with no
+    // PartialEq guard, so we gate on a Memo whose value only changes on a real
+    // switch, a new message (send / turn completion → `messages` grows), or a
+    // toggle. The snapshot is cleared on switch/off so a slow fetch never renders
+    // the previous conversation's tool output; `refresh_tool_activity` also drops
+    // a reply that arrives after a switch.
+    let tool_activity_trigger = Memo::new(move |_| {
+        (
+            view.show_tool_activity.get(),
+            view.current_conversation_id.get(),
+            view.messages.with(Vec::len),
+        )
+    });
+    let last_tool_activity_cid = StoredValue::new_local(None::<String>);
+    Effect::new(move |_| {
+        let (on, cid, _len) = tool_activity_trigger.get();
+        if !on {
+            engine_handle.with_value(|e| e.borrow().clear_tool_activity());
+            last_tool_activity_cid.set_value(None);
+            return;
+        }
+        let Some(id) = cid else { return };
+        let switched = last_tool_activity_cid.get_value().as_deref() != Some(id.as_str());
+        last_tool_activity_cid.set_value(Some(id.clone()));
+        engine_handle.with_value(|e| {
+            let e = e.borrow();
+            if switched {
+                e.clear_tool_activity();
+            }
+            e.refresh_tool_activity(id);
+        });
+    });
+
     // Conversation switcher drawer (issue #12): `false` = closed. The list now
     // updates live from other-client changes (#15) — a `ConversationListChanged`
     // event drives the reducer to refetch and repaint the sidebar. This
@@ -275,6 +310,9 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                 // Read-aloud toggle (issue #18): speaks completed replies via the
                 // browser's SpeechSynthesis. Self-hiding when the API is absent.
                 {crate::read_aloud::read_aloud_toggle(view)}
+                // Show-tool-activity toggle (issue #59): reveals Adele's tool
+                // results inline (collapsed). Off by default, persisted per device.
+                {crate::tool_activity::tool_activity_toggle(view)}
                 <button class="icon-btn" aria-label="Open settings" on:click=open_settings>
                     "\u{2699}"
                 </button>
@@ -290,22 +328,9 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
             </Show>
 
             <section class="messages">
-                {move || {
-                    view.messages
-                        .get()
-                        .into_iter()
-                        .map(|m| {
-                            // Render message content as sanitized markdown (issue
-                            // #48) instead of the old escaped `<p>{content}</p>`.
-                            view! {
-                                <div class=format!(
-                                    "msg {}",
-                                    m.role,
-                                )>{crate::markdown::message_body(&m.content)}</div>
-                            }
-                        })
-                        .collect_view()
-                }}
+                // Bubbles (markdown, issue #48) with tool results interleaved as
+                // collapsed rows when the opt-in is on (issue #59).
+                {crate::tool_activity::transcript_view(view)}
                 <Show when=move || view.streaming_active.get()>
                     <div class="msg assistant streaming">
                         {crate::markdown::streaming_body(view.streaming)}

@@ -76,6 +76,11 @@ mod sidebar;
 // engine's live `tasks` signal.
 #[cfg(any(target_arch = "wasm32", test))]
 mod tasks;
+// Opt-in "show tool activity" (#59): the merge-by-id + classify core is host-
+// tested here; a `#[cfg(target_arch = "wasm32")]` collapsed `<details>` view
+// renders the rows.
+#[cfg(any(target_arch = "wasm32", test))]
+mod tool_activity;
 #[cfg(any(target_arch = "wasm32", test))]
 mod wire;
 
