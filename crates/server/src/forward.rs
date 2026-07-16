@@ -337,6 +337,17 @@ mod tests {
     }
 
     #[test]
+    fn filter_keeps_empty_user_message() {
+        // The predicate keeps `user` unconditionally — an empty/whitespace user
+        // turn is still the user's turn. This pins parity with the shared
+        // reducer's `filter_messages`, which also keeps empty user messages, so a
+        // future divergence in either direction is caught.
+        let view = conversation(vec![mv("user", "   "), mv("assistant", "hi")]);
+        let out = filter_conversation_tool_activity(view);
+        assert_eq!(roles(&out), vec!["user", "assistant"]);
+    }
+
+    #[test]
     fn filter_keeps_user_and_nonempty_assistant() {
         let view = conversation(vec![mv("user", "hi"), mv("assistant", "hello")]);
         let out = filter_conversation_tool_activity(view);
