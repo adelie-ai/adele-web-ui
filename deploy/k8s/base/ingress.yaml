@@ -1,0 +1,57 @@
+# Expose the web UI on a real hostname via the cluster's ingress controller,
+# instead of `kubectl port-forward`: a cert-manager Certificate (populating a
+# TLS Secret from a ClusterIssuer) plus an Ingress that references it.
+#
+# PLACEHOLDERS - this repo is public, so no real hostname or issuer lives here:
+#   adele-web-ui.example.com   -> your internal/tailnet host
+#   letsencrypt-example        -> your cert-manager ClusterIssuer
+# An overlay patches both (see ../overlays/example). Keep this on a
+# private/VPN-only ingress - the web UI is NOT for the public internet.
+#
+# THE HOSTNAME APPEARS IN FOUR COUPLED PLACES and every one must agree, or the
+# instance half-works in a way that is annoying to diagnose:
+#
+#   1. Certificate .spec.dnsNames          (here)  - else TLS is for the wrong name
+#   2. Ingress .spec.rules[].host          (here)  - else the router 404s
+#   3. Ingress .spec.tls[].hosts           (here)  - else no cert is served
+#   4. ADELE_WEB_UI_ALLOWED_ORIGINS      (web-ui.yaml) - else the browser is
+#      rejected on the Origin check *after* TLS and routing look fine
+#
+# `just check-deploy` renders the overlay and asserts all four agree, so a
+# half-updated host fails the gate instead of the browser.
+#
+# The ingress controller must forward WebSocket upgrades to /ws (Traefik does by
+# default).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: adele-web-ui-cert
+spec:
+  secretName: adele-web-ui-tls
+  dnsNames:
+    - adele-web-ui.example.com
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-example
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adele-web-ui
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: adele-web-ui.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adele-web-ui
+                port:
+                  number: 9379
+  tls:
+    - hosts:
+        - adele-web-ui.example.com
+      secretName: adele-web-ui-tls

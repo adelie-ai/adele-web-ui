@@ -47,6 +47,30 @@ build-web:
         (cd crates/web && trunk build); \
     else echo "crates/web not present yet — skipping wasm SPA build"; fi
 
+# --- k8s deploy (deploy/k8s/) ------------------------------------------------
+# The deployment is a kustomize base plus a per-environment overlay supplying the
+# namespace, image tag, and ingress hostname. This repo is public, so it ships
+# only deploy/k8s/overlays/example; real overlays live outside the repo and point
+# at the base by relative path (see deploy/k8s/README.md).
+
+# Which overlay the deploy checks target. Defaults to the in-repo example; point
+# it at your private overlay to validate that before applying, e.g.
+#   ADELE_K8S_OVERLAY=../my-overlays/prod just check-deploy
+k8s_overlay := env_var_or_default("ADELE_K8S_OVERLAY", "deploy/k8s/overlays/example")
+
+# Validate the deploy manifests without touching a live cluster: the base and the
+# example overlay must render and pass client-side schema validation, and the
+# ingress-hostname coherence checks must pass for the target overlay. Safe in CI;
+# never contacts the API server.
+check-deploy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for target in deploy/k8s/base deploy/k8s/overlays/example; do
+      echo "kustomize render + dry-run validate: $target"
+      kubectl kustomize "$target" | kubectl apply --dry-run=client -f - >/dev/null
+    done
+    ./deploy/k8s/check-ingress-host.sh "{{k8s_overlay}}"
+
 # Rebase onto latest origin/main then run the gate (catches clean-rebase-but-broken-build)
 premerge:
     git fetch origin

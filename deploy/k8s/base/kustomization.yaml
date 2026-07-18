@@ -1,0 +1,30 @@
+# Namespace-agnostic base for the Adele web UI (Leptos SPA + axum BFF).
+#
+# Nothing here names an environment. No namespace, no real hostname, no real
+# registry. An overlay supplies all of that (see ../overlays/example) so the
+# same base can render more than one instance - e.g. a test and a production
+# stack - into different namespaces.
+#
+# This base expects two things to already exist in the target namespace, both
+# created imperatively so credentials never land in git:
+#
+#   adele-secrets     (key WS_LOGIN_PASSWORD) - shared with the daemon
+#   adele-web-ui-jwt  (key ws_jwt_hs256_signing_key)
+#
+# and one ConfigMap holding the environment's login username:
+#
+#   adele-web-ui-config (key login_username)
+#
+# See ../README.md for the exact commands.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - web-ui.yaml
+  - ingress.yaml
+
+# The web-ui image is a placeholder. Every overlay MUST override it via its own
+# `images:` entry, pinning a real registry and an immutable tag.
+images:
+  - name: registry.example.com:5000/adele/adele-web-ui
+    newTag: replace-me
