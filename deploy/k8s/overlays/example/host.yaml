@@ -1,0 +1,36 @@
+# Ingress hostname + cert-manager issuer for this environment (places 1-3 of the
+# four; place 4 is the browser Origin allowlist in origins.yaml).
+#
+# `dnsNames`, `rules[].host`, and `tls[].hosts` must all name the same host.
+# Strategic-merge replaces these lists wholesale, so each is spelled out.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: adele-web-ui-cert
+spec:
+  dnsNames:
+    - adele.example.com
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-example
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adele-web-ui
+spec:
+  rules:
+    - host: adele.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adele-web-ui
+                port:
+                  number: 9379
+  tls:
+    - hosts:
+        - adele.example.com
+      secretName: adele-web-ui-tls

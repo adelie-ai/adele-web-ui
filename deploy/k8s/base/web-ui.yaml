@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: adele-web-ui
-  namespace: adele-test
 spec:
   replicas: 1
   selector:
@@ -23,7 +22,7 @@ spec:
       containers:
         - name: web-ui
           # Replace with the image you built and pushed (see deploy/k8s/README.md).
-          # This is a PLACEHOLDER registry — never commit the real one.
+          # This is a PLACEHOLDER registry - never commit the real one.
           image: registry.example.com:5000/adele/adele-web-ui:REPLACE_ME
           imagePullPolicy: Always # mutable tag; re-pull on rollout
           ports:
@@ -40,9 +39,15 @@ spec:
             # Browser Origin allowlist. `http://localhost:9379` / `127.0.0.1`
             # cover `kubectl port-forward svc/adele-web-ui 9379:9379` (same-origin
             # SPA). `https://adele-web-ui.example.com` is a PLACEHOLDER for the
-            # ingress host (60-web-ui-ingress.yaml) — replace with your real host
-            # at apply time; add a Tailscale MagicDNS origin here too if you reach
-            # it over the tailnet without the ingress.
+            # ingress host - an overlay patches it (see ../overlays/example).
+            # Add a Tailscale MagicDNS origin here too if you reach the service
+            # over the tailnet without going through the ingress.
+            #
+            # This is one of the four coupled places the hostname appears; the
+            # other three are in ingress.yaml, which lists them. Getting this one
+            # wrong is the confusing failure: TLS and routing work, then the
+            # browser is rejected on the Origin check. `just check-deploy`
+            # asserts all four agree.
             - name: ADELE_WEB_UI_ALLOWED_ORIGINS
               value: "http://localhost:9379,http://127.0.0.1:9379,https://adele-web-ui.example.com"
             # Browser front-door login (POST /login, HTTP Basic). Reuses the same
@@ -62,7 +67,7 @@ spec:
                 secretKeyRef:
                   name: adele-secrets
                   key: WS_LOGIN_PASSWORD
-            # Back door → the in-cluster daemon over WebSocket (`/login` auth).
+            # Back door -> the in-cluster daemon over WebSocket (`/login` auth).
             - name: ADELE_WEB_UI_DAEMON_TRANSPORT
               value: "ws"
             - name: ADELE_WEB_UI_DAEMON_WS_URL
@@ -75,7 +80,7 @@ spec:
                   name: adele-secrets
                   key: WS_LOGIN_PASSWORD
             # Stable HS256 signing key for the browser session tokens the BFF
-            # mints, from a Secret — so a redeploy does NOT invalidate everyone's
+            # mints, from a Secret - so a redeploy does NOT invalidate everyone's
             # login. (Without this, the key regenerates on the per-pod emptyDir
             # every deploy, stranding the SPA on an invalid token.) Create once:
             #   kubectl -n <ns> create secret generic adele-web-ui-jwt \
@@ -85,15 +90,15 @@ spec:
                 secretKeyRef:
                   name: adele-web-ui-jwt
                   key: ws_jwt_hs256_signing_key
-            # Browser token lifetime — 7 days. 15 min was too short and stranded
-            # the SPA on expiry (it doesn't yet re-auth on 401 — tracked follow-up).
+            # Browser token lifetime - 7 days. 15 min was too short and stranded
+            # the SPA on expiry (it doesn't yet re-auth on 401 - tracked follow-up).
             - name: ADELE_WEB_UI_TOKEN_TTL_SECS
               value: "604800"
           volumeMounts:
             # Per-pod HS256 signing key for browser session tokens lives under
             # $XDG_DATA_HOME (/home/appuser/.local/share). An emptyDir keeps the
             # rootfs read-mostly and regenerates the key on restart (users just
-            # re-login) — acceptable for this single-user LAN service. Swap for a
+            # re-login) - acceptable for this single-user LAN service. Swap for a
             # PVC if you want tokens to survive a pod restart.
             - name: data
               mountPath: /home/appuser/.local/share
@@ -121,7 +126,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: adele-web-ui
-  namespace: adele-test
 spec:
   selector:
     app: adele-web-ui

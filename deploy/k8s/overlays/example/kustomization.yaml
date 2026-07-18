@@ -1,0 +1,35 @@
+# Example overlay - the shape a real environment takes, with placeholder values.
+#
+# Copy this directory to render an instance (test, production, ...). Everything
+# environment-specific lives HERE, never in ../../base:
+#
+#   * the namespace
+#   * the image registry + immutable tag
+#   * the ingress hostname and cert-manager ClusterIssuer
+#
+# This repo is PUBLIC. Real overlays - with real namespaces, registries, image
+# tags, and hostnames - MUST NOT be committed here. Keep them in a private
+# location and point `resources:` at this repo's base by relative path. See
+# ../../README.md ("Private overlays").
+#
+# The Namespace object itself is created by the desktop-assistant overlay that
+# renders the daemon stack into the same namespace; this overlay only targets it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: adele-example
+
+resources:
+  - ../../base
+
+images:
+  - name: registry.example.com:5000/adele/adele-web-ui
+    newName: registry.example.com:5000/adele/adele-web-ui
+    newTag: replace-me
+
+# The hostname lives in four coupled places (see ../../base/ingress.yaml). Both
+# patches below must name the SAME host, and `just check-deploy` fails the gate
+# if they drift apart.
+patches:
+  - path: host.yaml
+  - path: origins.yaml

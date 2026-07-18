@@ -1,0 +1,18 @@
+# Browser Origin allowlist for this environment (place 4 of the four the
+# hostname appears in - see ../../base/ingress.yaml).
+#
+# MUST include `https://<the host in host.yaml>`, or the SPA loads over TLS and
+# is then rejected on the Origin check. The localhost entries keep
+# `kubectl port-forward svc/adele-web-ui 9379:9379` working for debugging.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adele-web-ui
+spec:
+  template:
+    spec:
+      containers:
+        - name: web-ui
+          env:
+            - name: ADELE_WEB_UI_ALLOWED_ORIGINS
+              value: "http://localhost:9379,http://127.0.0.1:9379,https://adele.example.com"
