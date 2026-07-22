@@ -24,10 +24,16 @@ pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
             conversation_id,
             request_id,
             content,
+            idempotency_key,
         } => UiMessage::UserMessageAdded {
             conversation_id,
             request_id,
             content,
+            // Carry the echoed initiating key (#570) so the initiator dedupes its
+            // own optimistic bubble by exact key match, independent of ordering;
+            // `None` (voice / another client / a keyless send) falls back to the
+            // request_id / content dedupe.
+            idempotency_key,
         },
         // The reducer routes streaming events by `request_id` alone, so the
         // carried `conversation_id` is intentionally dropped here.
@@ -240,11 +246,17 @@ mod tests {
             conversation_id: "c1".to_string(),
             request_id: "r1".to_string(),
             content: "hi".to_string(),
+            idempotency_key: Some("turn-key".to_string()),
         };
         assert!(matches!(
             event_to_ui_message(ev),
-            Some(UiMessage::UserMessageAdded { conversation_id, request_id, content })
-                if conversation_id == "c1" && request_id == "r1" && content == "hi"
+            Some(UiMessage::UserMessageAdded { conversation_id, request_id, content, idempotency_key })
+                if conversation_id == "c1"
+                    && request_id == "r1"
+                    && content == "hi"
+                    // The echoed initiating key (#570) must survive the mapping so
+                    // the initiator can dedupe its optimistic bubble by exact match.
+                    && idempotency_key.as_deref() == Some("turn-key")
         ));
     }
 
@@ -326,6 +338,7 @@ mod tests {
                 conversation_id: "c1".to_string(),
                 request_id: "r1".to_string(),
                 content: "hi".to_string(),
+                idempotency_key: None,
             },
             Event::AssistantDelta {
                 conversation_id: "c1".to_string(),

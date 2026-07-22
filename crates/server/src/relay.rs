@@ -97,10 +97,15 @@ pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
             conversation_id,
             request_id,
             content,
+            idempotency_key,
         } => Some(api::Event::UserMessageAdded {
             conversation_id: conversation_id.clone(),
             request_id: request_id.clone(),
             content: content.clone(),
+            // Forward the daemon's echoed key (#570) unchanged. A cross-client /
+            // voice turn's key won't match this browser's own optimistic bubbles,
+            // so the SPA renders it live (the intended fan-out behaviour).
+            idempotency_key: idempotency_key.clone(),
         }),
         SignalEvent::Chunk {
             conversation_id,
@@ -339,12 +344,17 @@ mod tests {
             conversation_id: "c1".into(),
             request_id: DAEMON_RID.into(),
             content: "hello".into(),
+            idempotency_key: Some("turn-key".into()),
         })
         .expect("relayed");
         assert!(matches!(
             ev,
-            api::Event::UserMessageAdded { conversation_id, request_id, content }
-                if conversation_id == "c1" && request_id == DAEMON_RID && content == "hello"
+            api::Event::UserMessageAdded { conversation_id, request_id, content, idempotency_key }
+                if conversation_id == "c1"
+                    && request_id == DAEMON_RID
+                    && content == "hello"
+                    // The echoed key (#570) rides the relay so the SPA can dedupe.
+                    && idempotency_key.as_deref() == Some("turn-key")
         ));
     }
 
@@ -539,6 +549,7 @@ mod tests {
                 conversation_id: "c1".into(),
                 request_id: DAEMON_RID.into(),
                 content: "hi".into(),
+                idempotency_key: None,
             },
             chunk("c1"),
             SignalEvent::Complete {

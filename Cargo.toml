@@ -45,6 +45,11 @@ desktop-assistant-ws = { path = "../desktop-assistant/crates/ws-interface" }
 desktop-assistant-client-common = { path = "../desktop-assistant/crates/client-common", default-features = false }
 desktop-assistant-api-model = { path = "../desktop-assistant/crates/api-model" }
 desktop-assistant-auth-jwt = { path = "../desktop-assistant/crates/auth-jwt" }
+# Test-only (server dev-dependency): an in-process UDS daemon double so the
+# forwarding path can be exercised end-to-end over the real transport — proving
+# the browser `SendMessage.idempotency_key` (#570) reaches the daemon-side
+# command. Not linked into the shipping BFF.
+desktop-assistant-uds = { path = "../desktop-assistant/crates/uds-interface" }
 # The domain core, for the `CLIENT_CONTEXT` task-local accessor
 # (`ports::transport::current_client_context`) the forward path reads to attach
 # the browser's per-turn client context (#557). Already in the resolved graph
