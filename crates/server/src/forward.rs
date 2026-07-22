@@ -101,6 +101,9 @@ impl AssistantApiHandler for ForwardingHandler {
                 content,
                 override_selection,
                 system_refinement,
+                // The BFF supplies per-turn client context per send elsewhere
+                // (epic #549); this forward path carries none (desktop-assistant#557).
+                client_context: None,
                 idempotency_key,
             })
             .await

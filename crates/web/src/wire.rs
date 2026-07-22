@@ -136,6 +136,7 @@ mod tests {
                 content: "hi".to_string(),
                 override_selection: None,
                 system_refinement: String::new(),
+                client_context: None,
                 idempotency_key: None,
             },
         };
@@ -145,11 +146,16 @@ mod tests {
         assert_eq!(sm["conversation_id"], "c1");
         assert_eq!(sm["content"], "hi");
         // `override_selection` renames to "override"; it and the empty refinement
-        // / absent idempotency key are skipped, matching the daemon's wire shape.
+        // / absent client context / absent idempotency key are skipped, matching
+        // the daemon's wire shape.
         assert!(sm.get("override").is_none(), "override skipped when None");
         assert!(
             sm.get("system_refinement").is_none(),
             "empty refinement skipped"
+        );
+        assert!(
+            sm.get("client_context").is_none(),
+            "absent client_context skipped"
         );
         assert!(sm.get("idempotency_key").is_none(), "absent key skipped");
     }

@@ -1503,6 +1503,9 @@ impl Engine {
                 content: prompt.clone(),
                 override_selection,
                 system_refinement: system_refinement.unwrap_or_default(),
+                // Per-turn client context (desktop-assistant#557) is not carried
+                // by the SPA send path.
+                client_context: None,
                 idempotency_key: None,
             };
             match transport.send_command(cmd).await {
