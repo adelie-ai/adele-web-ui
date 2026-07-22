@@ -1441,6 +1441,7 @@ impl Engine {
                 content: prompt.clone(),
                 override_selection,
                 system_refinement: system_refinement.unwrap_or_default(),
+                client_context: None,
                 idempotency_key: None,
             };
             match transport.send_command(cmd).await {

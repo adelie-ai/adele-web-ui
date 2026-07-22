@@ -101,6 +101,7 @@ impl AssistantApiHandler for ForwardingHandler {
                 content,
                 override_selection,
                 system_refinement,
+                client_context: None,
                 idempotency_key,
             })
             .await
