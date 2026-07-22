@@ -10,6 +10,7 @@
 
 mod auth;
 mod config;
+mod daemon_conn;
 mod forward;
 mod relay;
 mod subs_forward;
@@ -22,12 +23,13 @@ use axum::routing::get;
 use desktop_assistant_api_model as api;
 use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_auth_jwt::{default_signing_key_path, ensure_signing_key_at};
-use desktop_assistant_client_common::{ConnectionConfig, Connector, TransportMode};
+use desktop_assistant_client_common::Connector;
 use desktop_assistant_ws::{WsAuthValidator, WsLoginService, WsServeConfig};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{DEFAULT_TOKEN_TTL_SECS, JwtValidator, PasswordLogin};
-use crate::config::{BffConfig, DaemonTransport};
+use crate::config::BffConfig;
+use crate::daemon_conn::build_daemon_connection_config;
 use crate::forward::ForwardingHandler;
 
 #[tokio::main]
@@ -64,46 +66,11 @@ async fn main() -> anyhow::Result<()> {
             .context("loading/creating the JWT signing key")?,
     };
 
-    // Back door: a long-lived Connector to the daemon. Two ways in:
-    //  * UDS (default) — a co-located daemon authenticates this process by kernel
-    //    peer-cred (desktop-assistant#407); no token is minted (tokenless).
-    //  * WS — a remote daemon (e.g. on k8s); auth is the daemon's `/login`
-    //    password exchange (or a pre-minted `daemon_ws_jwt`). Mirrors the tui/gtk
-    //    `ConnectionConfig`. `tls_ca_cert` (default) is unused for `ws://`.
-    let (conn_config, back_door) = match config.daemon_transport {
-        DaemonTransport::Uds => (
-            ConnectionConfig {
-                transport_mode: TransportMode::Uds,
-                socket_path: config.uds_socket.clone(),
-                ..ConnectionConfig::default()
-            },
-            "UDS".to_string(),
-        ),
-        DaemonTransport::Ws => {
-            let ws_url = config.daemon_ws_url.clone().context(
-                "daemon_transport = ws requires daemon_ws_url (ADELE_WEB_UI_DAEMON_WS_URL)",
-            )?;
-            let back_door = format!("WS {ws_url}");
-            (
-                ConnectionConfig {
-                    transport_mode: TransportMode::Ws,
-                    ws_url,
-                    ws_login_username: config.daemon_ws_username.clone(),
-                    ws_login_password: config.daemon_ws_password.clone(),
-                    ws_jwt: config.daemon_ws_jwt.clone(),
-                    // No custom CA: a plain `ws://` back door needs none, and for
-                    // `wss://` reqwest/tungstenite fall back to the system roots.
-                    // The default `Some(<XDG>/…/ca.pem)` would force reading a
-                    // daemon CA file that doesn't exist in the container (and the
-                    // in-cluster daemon runs `ws://`, TLS off). A self-signed
-                    // `wss://` CA would be a follow-up env var.
-                    tls_ca_cert: None,
-                    ..ConnectionConfig::default()
-                },
-                back_door,
-            )
-        }
-    };
+    // Back door: a long-lived Connector to the daemon, over UDS (co-located,
+    // peer-cred) or WS (a remote daemon). The BFF deliberately does not share its
+    // own server environment as client context (#557) — see
+    // `build_daemon_connection_config`.
+    let (conn_config, back_door) = build_daemon_connection_config(&config)?;
     let connector = Connector::connect(&conn_config)
         .await
         .with_context(|| format!("connecting to the assistant daemon over {back_door}"))?;
