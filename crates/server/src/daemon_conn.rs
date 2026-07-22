@@ -22,6 +22,17 @@ use crate::config::{BffConfig, DaemonTransport};
 ///    default `Some(<XDG>/…/ca.pem)` would force reading a daemon CA file that
 ///    doesn't exist in the container; for `wss://`, reqwest/tungstenite fall
 ///    back to the system roots.
+///
+/// # Client context (#557)
+///
+/// `share_client_context` is forced **off** on both transports. It gates
+/// client-common's native `resolve_client_context`, which reads THIS process's
+/// environment — home dir, username, hostname, timezone, OS. For the BFF that
+/// is the *server's* machine, not the browser user's, so sharing it would put
+/// false personal and device facts in the daemon's system prompt. A browser
+/// user's context is limited to what a browser can actually know — timezone
+/// (`Intl.DateTimeFormat`) and a coarse platform — resolved in the wasm client
+/// and attached separately; the BFF never uses the local-environment resolver.
 pub fn build_daemon_connection_config(
     config: &BffConfig,
 ) -> anyhow::Result<(ConnectionConfig, String)> {
@@ -30,6 +41,7 @@ pub fn build_daemon_connection_config(
             ConnectionConfig {
                 transport_mode: TransportMode::Uds,
                 socket_path: config.uds_socket.clone(),
+                share_client_context: false,
                 ..ConnectionConfig::default()
             },
             "UDS".to_string(),
@@ -47,6 +59,7 @@ pub fn build_daemon_connection_config(
                     ws_login_password: config.daemon_ws_password.clone(),
                     ws_jwt: config.daemon_ws_jwt.clone(),
                     tls_ca_cert: None,
+                    share_client_context: false,
                     ..ConnectionConfig::default()
                 },
                 back_door,
