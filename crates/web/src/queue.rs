@@ -26,9 +26,15 @@ pub const CHIP_PREVIEW_MAX: usize = 40;
 /// panics. An empty/whitespace-only preview stays empty (the reducer never
 /// queues blank text, but the helper is total).
 pub fn chip_preview(text: &str, max: usize) -> String {
-    // STUB (red): real impl collapses whitespace + elides to `max` chars.
-    let _ = (text, max);
-    String::new()
+    // Collapse any run of whitespace (including the `\n` joins of a multi-line
+    // queued message) to a single space so the chip stays one tidy line.
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max {
+        return collapsed;
+    }
+    // Reserve the final slot for the ellipsis; truncate on a `char` boundary.
+    let head: String = collapsed.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 /// What an ArrowUp/ArrowDown recall keystroke should ask the reducer to do.
@@ -58,9 +64,19 @@ pub enum RecallAction {
 /// - Editing item `i`: step to the previous item (`Edit(i - 1)`), or `None` at
 ///   the first item (`i == 0`), where there is nowhere earlier to go.
 pub fn recall_up(editing: Option<usize>, view_queue_len: usize) -> RecallAction {
-    // STUB (red): real impl walks backward from the last queued item.
-    let _ = (editing, view_queue_len);
-    RecallAction::None
+    match editing {
+        // Not editing: the whole queue is visible, so its last index is
+        // `len - 1`. An empty queue has nothing to recall.
+        None => match view_queue_len {
+            0 => RecallAction::None,
+            len => RecallAction::Edit(len - 1),
+        },
+        // Already at the earliest item: nowhere earlier to walk.
+        Some(0) => RecallAction::None,
+        // `i` is the full-queue index; the reducer reinserts the currently
+        // checked-out item before checking out `i - 1`, so the index is absolute.
+        Some(i) => RecallAction::Edit(i - 1),
+    }
 }
 
 /// The ArrowDown (recall-forward) walk, meaningful only while editing.
@@ -73,9 +89,116 @@ pub fn recall_up(editing: Option<usize>, view_queue_len: usize) -> RecallAction 
 ///   else [`Cancel`](RecallAction::Cancel) — stepping past the last item returns
 ///   the checked-out message to the queue and drops back to a fresh composer.
 pub fn recall_down(editing: Option<usize>, view_queue_len: usize) -> RecallAction {
-    // STUB (red): real impl steps forward / cancels off the end.
-    let _ = (editing, view_queue_len);
-    RecallAction::None
+    match editing {
+        None => RecallAction::None,
+        Some(i) => {
+            // The checked-out item is absent from the view, so the full queue is
+            // one longer. Step forward while a next item exists; off the end,
+            // cancel back to a fresh composer.
+            let full_len = view_queue_len + 1;
+            if i + 1 < full_len {
+                RecallAction::Edit(i + 1)
+            } else {
+                RecallAction::Cancel
+            }
+        }
+    }
+}
+
+/// Translate a queued-chip's position in the *view* list into the full-queue
+/// index to pass to `UiMessage::EditQueued`.
+///
+/// While an item is checked out for editing (`editing == Some(e)`) it is absent
+/// from the view list (`queued_messages_for_view`), so every chip at or after its
+/// slot is shifted down by one. `EditQueued` reinserts the checked-out item
+/// before checking out the new one, so it expects a *full*-queue index: a chip at
+/// view position `>= e` is really full-queue position `+ 1`. With nothing checked
+/// out, the view list IS the queue and the index passes through unchanged.
+///
+/// Only [`RecallAction::Edit`] from a chip *tap* needs this — the up/down recall
+/// walk already works in full-queue indices, and `RemoveQueued` deletes straight
+/// from the view list, so neither is translated.
+pub fn chip_edit_index(view_index: usize, editing: Option<usize>) -> usize {
+    match editing {
+        Some(e) if view_index >= e => view_index + 1,
+        _ => view_index,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use view::queued_chips;
+
+#[cfg(target_arch = "wasm32")]
+mod view {
+    use leptos::prelude::*;
+
+    use super::{CHIP_PREVIEW_MAX, chip_preview};
+    use crate::engine::ViewSignals;
+    use crate::settings::EngineHandle;
+
+    /// The queued-messages strip, shown just above the composer whenever the open
+    /// conversation has messages queued (submitted while Adele was busy and not
+    /// yet flushed). A leading "N queued" count frames the batch; each chip
+    /// previews one queued message. Tapping a chip's body checks it out into the
+    /// composer to edit (`EditQueued`); its × drops it (`RemoveQueued`). Hidden
+    /// (zero footprint) when the queue is empty, so it never crowds the phone
+    /// chat. The strip scrolls horizontally rather than wrapping, so the composer
+    /// keeps a stable height as the batch grows.
+    ///
+    /// The queued texts + the checked-out index come from the shared reducer
+    /// (mirrored into `view.queued` / `view.editing_queued`); the count folds the
+    /// checked-out item back in so it matches the user's mental batch size while
+    /// an item is being edited.
+    pub fn queued_chips(engine: EngineHandle, view: ViewSignals) -> impl IntoView {
+        move || {
+            let queued = view.queued.get();
+            let editing = view.editing_queued.get();
+            // The count folds the checked-out item (absent from `queued`) back in
+            // so "N queued" matches the user's mental batch size while editing.
+            let total = queued.len() + usize::from(editing.is_some());
+            if total == 0 {
+                return None;
+            }
+            let chips = queued
+                .into_iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let label = chip_preview(&text, CHIP_PREVIEW_MAX);
+                    // Editing tap needs the full-queue index (the checked-out item
+                    // is missing from this list); remove deletes from the list as-is.
+                    let edit_index = super::chip_edit_index(index, editing);
+                    let edit =
+                        move |_| engine.with_value(|e| e.borrow_mut().edit_queued(edit_index));
+                    let remove =
+                        move |_| engine.with_value(|e| e.borrow_mut().remove_queued(index));
+                    view! {
+                        <span class="queued-chip" role="listitem">
+                            <button
+                                class="queued-chip-edit"
+                                title=text
+                                on:click=edit
+                            >
+                                {label}
+                            </button>
+                            <button
+                                class="queued-chip-remove"
+                                aria-label="Remove queued message"
+                                on:click=remove
+                            >
+                                "\u{2715}"
+                            </button>
+                        </span>
+                    }
+                })
+                .collect_view();
+            Some(view! {
+                <div class="queued-strip" role="list" aria-label="Queued messages">
+                    <span class="queued-count">{format!("{total} queued")}</span>
+                    {chips}
+                </div>
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -101,7 +224,10 @@ mod tests {
     fn chip_preview_collapses_internal_whitespace() {
         // Newlines (from a multi-line queued message) and runs of spaces become
         // single spaces so the chip stays one line.
-        assert_eq!(chip_preview("first\nsecond   third", 40), "first second third");
+        assert_eq!(
+            chip_preview("first\nsecond   third", 40),
+            "first second third"
+        );
     }
 
     #[test]
@@ -129,6 +255,32 @@ mod tests {
     #[test]
     fn chip_preview_empty_stays_empty() {
         assert_eq!(chip_preview("   \n  ", 40), "");
+    }
+
+    // --- chip_edit_index (chip-tap view-index -> full-queue index) -----------
+
+    #[test]
+    fn chip_edit_index_passthrough_when_not_editing() {
+        // Nothing checked out: the view list IS the queue, indices pass through.
+        assert_eq!(chip_edit_index(0, None), 0);
+        assert_eq!(chip_edit_index(3, None), 3);
+    }
+
+    #[test]
+    fn chip_edit_index_shifts_chips_at_or_after_the_hole() {
+        // Full ["a","b","c","d"], "c" (full-index 2) checked out -> view
+        // ["a"(0),"b"(1),"d"(2)]. Chips before the hole are unchanged; the chip at
+        // the hole and after map to their full-queue positions (+1).
+        assert_eq!(chip_edit_index(0, Some(2)), 0); // a
+        assert_eq!(chip_edit_index(1, Some(2)), 1); // b
+        assert_eq!(chip_edit_index(2, Some(2)), 3); // d, not c
+    }
+
+    #[test]
+    fn chip_edit_index_hole_at_front_shifts_all() {
+        // "a" (full-index 0) checked out -> every remaining chip is shifted by one.
+        assert_eq!(chip_edit_index(0, Some(0)), 1);
+        assert_eq!(chip_edit_index(1, Some(0)), 2);
     }
 
     // --- recall_up (ArrowUp, walk backward) ----------------------------------

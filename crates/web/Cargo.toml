@@ -68,6 +68,10 @@ web-sys = { version = "0.3", features = [
     "Location",
     "SpeechSynthesis",
     "SpeechSynthesisUtterance",
+    # `.key()` on the composer's keydown event for the queue recall walk
+    # (feat/queue-messages). Leptos already enables this transitively; declared
+    # here so our direct use is self-documenting.
+    "KeyboardEvent",
 ] }
 
 [lints.rust]

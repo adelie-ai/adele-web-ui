@@ -62,6 +62,22 @@ pub struct ViewSignals {
     pub streaming: RwSignal<String>,
     pub streaming_active: RwSignal<bool>,
     pub send_enabled: RwSignal<bool>,
+    // --- Message queuing (feat/queue-messages) -------------------------------
+    /// The live composer text. Engine-owned (not a component-local signal) so the
+    /// reducer can push into it via [`Effect::SetComposerText`] — clearing it when
+    /// a submit is queued, and loading a queued message back for editing (recall).
+    /// The `<input>` binds `prop:value` to this and writes it back `on:input`.
+    pub composer: RwSignal<String>,
+    /// The open conversation's queued (submitted-while-busy, not-yet-sent)
+    /// messages in submit order, pulled from `queued_messages_for_view()` in
+    /// `sync_view` after every dispatch. Drives the queued-chips strip + the
+    /// "N queued" count. Empty when nothing is queued.
+    pub queued: RwSignal<Vec<String>>,
+    /// The outbox index of the queued message currently checked out into the
+    /// composer for editing (from `editing_queued_index()`), or `None` when
+    /// composing fresh. Drives the up/down recall walk; the checked-out item is
+    /// absent from `queued` while it is being edited.
+    pub editing_queued: RwSignal<Option<usize>>,
     // --- Read-aloud (issue #18) ----------------------------------------------
     /// The most recently *completed* assistant reply, as `(request_id, text)`,
     /// set on every `StreamComplete` (local or cross-client). The read-aloud
@@ -253,6 +269,9 @@ impl ViewSignals {
             streaming: RwSignal::new(String::new()),
             streaming_active: RwSignal::new(false),
             send_enabled: RwSignal::new(true),
+            composer: RwSignal::new(String::new()),
+            queued: RwSignal::new(Vec::new()),
+            editing_queued: RwSignal::new(None),
             last_completed_reply: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             model_picker_visible: RwSignal::new(false),
@@ -370,6 +389,31 @@ impl Engine {
     /// bubble to state, so `sync_view` renders it without extra wiring.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.dispatch(UiMessage::SubmitPrompt { prompt });
+    }
+
+    // --- Message queuing (feat/queue-messages) -------------------------------
+    //
+    // Thin dispatchers over the reducer's queue messages, driven by the
+    // queued-chips strip (edit/remove affordances) and the composer's up/down
+    // recall walk. The reducer owns the outbox mutation and pushes any composer
+    // change back via `SetComposerText`; these just forward the intent.
+
+    /// Check out queued item `index` into the composer for editing (a chip's
+    /// edit tap, or an ArrowUp/ArrowDown recall step). Any already-checked-out
+    /// item returns to the queue unchanged first (reducer contract).
+    pub fn edit_queued(&mut self, index: usize) {
+        self.dispatch(UiMessage::EditQueued { index });
+    }
+
+    /// Drop queued item `index` without sending it (a chip's × affordance).
+    pub fn remove_queued(&mut self, index: usize) {
+        self.dispatch(UiMessage::RemoveQueued { index });
+    }
+
+    /// Abandon an in-progress recall edit: the checked-out message returns to the
+    /// queue unchanged and the composer clears (ArrowDown off the last item).
+    pub fn cancel_queued_edit(&mut self) {
+        self.dispatch(UiMessage::CancelQueuedEdit);
     }
 
     // --- Conversation switcher (issue #12) -----------------------------------
@@ -600,6 +644,18 @@ impl Engine {
         self.view
             .current_conversation_id
             .set(self.state.current_conversation_id.clone());
+        // Message queue (feat/queue-messages): the reducer owns the outbox +
+        // edit state and re-derives it after every dispatch, so we pull the
+        // render snapshot here rather than tracking `Effect::SetQueuedMessages`.
+        // The composer text is NOT pulled — it's pushed by `SetComposerText`
+        // (recall/clear) and written by the user's keystrokes, so re-deriving it
+        // from state would fight live typing.
+        self.view
+            .queued
+            .set(self.state.queued_messages_for_view().to_vec());
+        self.view
+            .editing_queued
+            .set(self.state.editing_queued_index());
     }
 
     fn run_effect(&mut self, effect: Effect) {
@@ -618,6 +674,12 @@ impl Engine {
             Effect::SetStatusText(text) | Effect::SetChatStatus(text) => self.view.status.set(text),
             Effect::ClearChatStatus => self.view.status.set(String::new()),
             Effect::SetSendSensitive(enabled) => self.view.send_enabled.set(enabled),
+            // --- Message queuing (feat/queue-messages) -----------------------
+            // The reducer can only reach the live composer widget through this
+            // effect: it clears the composer when a submit is queued/committed
+            // and loads a queued message back on recall. The queued *list* is
+            // pulled in `sync_view` (`SetQueuedMessages` is deliberately ignored).
+            Effect::SetComposerText(text) => self.view.composer.set(text),
             // --- Model selection (issue #9) ----------------------------------
             // The reducer owns the *selection* precedence and emits these view
             // effects; the engine mirrors them into signals the settings panel
