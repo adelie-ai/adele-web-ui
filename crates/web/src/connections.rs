@@ -31,20 +31,28 @@ use desktop_assistant_api_model::{
 pub enum ConnectorKind {
     Anthropic,
     OpenAi,
+    OpenRouter,
     Bedrock,
     Ollama,
 }
 
 impl ConnectorKind {
-    /// Every kind, in nav/add order.
-    pub const ALL: &'static [ConnectorKind] =
-        &[Self::Anthropic, Self::OpenAi, Self::Bedrock, Self::Ollama];
+    /// Every kind, in nav/add order. This drives the create picker; Azure and
+    /// Google are config-file-only in v1 and intentionally absent here.
+    pub const ALL: &'static [ConnectorKind] = &[
+        Self::Anthropic,
+        Self::OpenAi,
+        Self::OpenRouter,
+        Self::Bedrock,
+        Self::Ollama,
+    ];
 
     /// Human-friendly label for chips / headings.
     pub fn label(self) -> &'static str {
         match self {
             Self::Anthropic => "Anthropic",
             Self::OpenAi => "OpenAI",
+            Self::OpenRouter => "OpenRouter",
             Self::Bedrock => "Bedrock",
             Self::Ollama => "Ollama",
         }
@@ -56,6 +64,7 @@ impl ConnectorKind {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
             Self::Bedrock => "bedrock",
             Self::Ollama => "ollama",
         }
@@ -80,6 +89,7 @@ impl ConnectorKind {
         match self {
             Self::Bedrock => "ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]",
             Self::Anthropic | Self::OpenAi => "Paste API key (stored write-only)",
+            Self::OpenRouter => "Paste OpenRouter API key (sk-or-...)",
             Self::Ollama => "",
         }
     }
@@ -126,6 +136,12 @@ impl PreservedFields {
                     max_context_tokens,
                     ..
                 }
+                | ConnectionConfigView::OpenRouter {
+                    connect_timeout_secs,
+                    stream_timeout_secs,
+                    max_context_tokens,
+                    ..
+                }
                 | ConnectionConfigView::Bedrock {
                     connect_timeout_secs,
                     stream_timeout_secs,
@@ -150,7 +166,9 @@ impl PreservedFields {
                 max_context_tokens: *max_context_tokens,
                 keep_warm: *keep_warm,
             },
-            None => Self::default(),
+            // The create path (`None`), plus Azure/Google (config-file-only in
+            // v1) and any future variant: no form-surfaced fields to preserve.
+            _ => Self::default(),
         }
     }
 }
@@ -228,6 +246,11 @@ impl ConnForm {
                 base_url,
                 api_key_env,
                 ..
+            })
+            | Some(ConnectionConfigView::OpenRouter {
+                base_url,
+                api_key_env,
+                ..
             }) => (
                 base_url.clone().unwrap_or_default(),
                 api_key_env.clone().unwrap_or_default(),
@@ -251,7 +274,10 @@ impl ConnForm {
                 String::new(),
                 String::new(),
             ),
-            None => (String::new(), String::new(), String::new(), String::new()),
+            // `None` (older daemon / create), plus Azure/Google (config-file-only
+            // in v1) and any future variant with no OpenAI-shaped fields to
+            // surface: leave every field blank.
+            _ => (String::new(), String::new(), String::new(), String::new()),
         };
 
         Self {
@@ -295,7 +321,7 @@ impl ConnForm {
                 self.clear_secret,
             ),
             // The single-field api-key connectors send their raw key as-is.
-            ConnectorKind::Anthropic | ConnectorKind::OpenAi => {
+            ConnectorKind::Anthropic | ConnectorKind::OpenAi | ConnectorKind::OpenRouter => {
                 credential_action(&self.secret, self.clear_secret)
             }
             // Ollama takes no credential.
@@ -330,6 +356,13 @@ impl ConnForm {
                 max_context_tokens: p.max_context_tokens,
             },
             ConnectorKind::OpenAi => ConnectionConfigView::OpenAi {
+                base_url: opt(&self.base_url),
+                api_key_env: opt(&self.api_key_env),
+                connect_timeout_secs: p.connect_timeout_secs,
+                stream_timeout_secs: p.stream_timeout_secs,
+                max_context_tokens: p.max_context_tokens,
+            },
+            ConnectorKind::OpenRouter => ConnectionConfigView::OpenRouter {
                 base_url: opt(&self.base_url),
                 api_key_env: opt(&self.api_key_env),
                 connect_timeout_secs: p.connect_timeout_secs,
@@ -955,7 +988,7 @@ mod view {
     /// The per-connector config inputs, keyed on the selected kind.
     fn kind_fields(form: FormState) -> AnyView {
         match form.kind.get() {
-            ConnectorKind::Anthropic | ConnectorKind::OpenAi => view! {
+            ConnectorKind::Anthropic | ConnectorKind::OpenAi | ConnectorKind::OpenRouter => view! {
                 {text_field("Base URL (optional)", form.base_url, "https://api.example.com/v1")}
                 {text_field("API key env var (optional)", form.api_key_env, "e.g. OPENAI_API_KEY")}
             }
@@ -1133,6 +1166,16 @@ mod tests {
         }
     }
 
+    fn openrouter_config() -> ConnectionConfigView {
+        ConnectionConfigView::OpenRouter {
+            base_url: Some("https://openrouter.ai/api/v1".into()),
+            api_key_env: Some("OPENROUTER_WORK_KEY".into()),
+            connect_timeout_secs: None,
+            stream_timeout_secs: None,
+            max_context_tokens: None,
+        }
+    }
+
     fn view(id: &str, ty: &str, config: Option<ConnectionConfigView>) -> ConnectionView {
         ConnectionView {
             id: id.into(),
@@ -1155,22 +1198,36 @@ mod tests {
     }
 
     #[test]
-    fn connector_kind_all_covers_four_variants() {
-        assert_eq!(ConnectorKind::ALL.len(), 4);
+    fn connector_kind_all_covers_five_variants() {
+        // Anthropic, OpenAI, OpenRouter, Bedrock, Ollama. Azure/Google are
+        // config-file-only in v1 and intentionally not in the create picker.
+        assert_eq!(ConnectorKind::ALL.len(), 5);
+        assert!(ConnectorKind::ALL.contains(&ConnectorKind::OpenRouter));
     }
 
     #[test]
     fn connector_kind_labels() {
         assert_eq!(ConnectorKind::Anthropic.label(), "Anthropic");
         assert_eq!(ConnectorKind::OpenAi.label(), "OpenAI");
+        assert_eq!(ConnectorKind::OpenRouter.label(), "OpenRouter");
         assert_eq!(ConnectorKind::Bedrock.label(), "Bedrock");
         assert_eq!(ConnectorKind::Ollama.label(), "Ollama");
+    }
+
+    #[test]
+    fn openrouter_tag_round_trips() {
+        assert_eq!(ConnectorKind::OpenRouter.tag(), "openrouter");
+        assert_eq!(
+            ConnectorKind::from_tag("openrouter"),
+            Some(ConnectorKind::OpenRouter)
+        );
     }
 
     #[test]
     fn accepts_credential_excludes_only_ollama() {
         assert!(ConnectorKind::Anthropic.accepts_credential());
         assert!(ConnectorKind::OpenAi.accepts_credential());
+        assert!(ConnectorKind::OpenRouter.accepts_credential());
         assert!(ConnectorKind::Bedrock.accepts_credential());
         assert!(!ConnectorKind::Ollama.accepts_credential());
     }
@@ -1183,6 +1240,13 @@ mod tests {
                 .contains("ACCESS_KEY_ID")
         );
         assert!(ConnectorKind::Ollama.credential_placeholder().is_empty());
+        // OpenRouter offers a non-empty API-key hint (it takes a credential).
+        assert!(
+            ConnectorKind::OpenRouter
+                .credential_placeholder()
+                .to_lowercase()
+                .contains("openrouter")
+        );
     }
 
     // --- credential_action ----------------------------------------------------
@@ -1377,6 +1441,34 @@ mod tests {
     }
 
     #[test]
+    fn build_openrouter_config_and_id() {
+        let mut form = ConnForm::blank(ConnectorKind::OpenRouter);
+        form.id = "router".into();
+        form.base_url = "https://openrouter.ai/api/v1".into();
+        form.api_key_env = "OPENROUTER_API_KEY".into();
+        form.secret = "sk-or-live".into();
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.editing_id, None);
+        assert_eq!(built.id, "router");
+        // OpenRouter is OpenAI-shaped: base_url + api_key_env, api-key credential.
+        match built.config {
+            ConnectionConfigView::OpenRouter {
+                base_url,
+                api_key_env,
+                ..
+            } => {
+                assert_eq!(base_url.as_deref(), Some("https://openrouter.ai/api/v1"));
+                assert_eq!(api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+            }
+            other => panic!("expected OpenRouter, got {other:?}"),
+        }
+        assert_eq!(
+            built.credential,
+            Some(CredentialAction::Set("sk-or-live".into()))
+        );
+    }
+
+    #[test]
     fn build_anthropic_config() {
         let mut form = ConnForm::blank(ConnectorKind::Anthropic);
         form.id = "claude".into();
@@ -1527,6 +1619,32 @@ mod tests {
     }
 
     #[test]
+    fn from_view_prefills_openrouter_and_sets_editing() {
+        let form = ConnForm::from_view(&view("router", "openrouter", Some(openrouter_config())));
+        assert_eq!(form.editing_id.as_deref(), Some("router"));
+        assert_eq!(form.id, "router");
+        assert_eq!(form.kind, ConnectorKind::OpenRouter);
+        assert_eq!(form.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(form.api_key_env, "OPENROUTER_WORK_KEY");
+        // The stored secret is never echoed into the form.
+        assert_eq!(form.secret, "");
+        // Round-trip: an edit save rebuilds an OpenRouter config unchanged.
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.editing_id.as_deref(), Some("router"));
+        match built.config {
+            ConnectionConfigView::OpenRouter {
+                base_url,
+                api_key_env,
+                ..
+            } => {
+                assert_eq!(base_url.as_deref(), Some("https://openrouter.ai/api/v1"));
+                assert_eq!(api_key_env.as_deref(), Some("OPENROUTER_WORK_KEY"));
+            }
+            other => panic!("expected OpenRouter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn from_view_prefills_bedrock() {
         let config = ConnectionConfigView::Bedrock {
             aws_profile: Some("prod".into()),
@@ -1541,6 +1659,33 @@ mod tests {
         assert_eq!(form.aws_profile, "prod");
         assert_eq!(form.region, "eu-central-1");
         assert_eq!(form.base_url, "");
+    }
+
+    #[test]
+    fn from_view_folds_azure_into_blank_form_without_panic() {
+        // Azure/Google are config-file-only in v1: the create picker never
+        // offers them, and `from_tag` doesn't know their tags — so a Configure
+        // click on such a connection must not panic. It falls back to a usable
+        // (Anthropic-kind) blank form, and PreservedFields stays all-None.
+        let azure = ConnectionConfigView::Azure {
+            base_url: Some("https://example.openai.azure.com".into()),
+            api_key_env: Some("AZURE_OPENAI_KEY".into()),
+            api_surface: Some("chat".into()),
+            auth_mode: Some("api_key".into()),
+            api_version: Some("2024-06-01".into()),
+            connect_timeout_secs: Some(7),
+            stream_timeout_secs: Some(90),
+            max_context_tokens: Some(128_000),
+        };
+        let form = ConnForm::from_view(&view("az", "azure", Some(azure)));
+        // Unknown connector tag -> Anthropic fallback, no config match -> blanks.
+        assert_eq!(form.kind, ConnectorKind::Anthropic);
+        assert_eq!(form.id, "az");
+        assert_eq!(form.base_url, "");
+        assert_eq!(form.api_key_env, "");
+        assert_eq!(form.preserved, PreservedFields::default());
+        // The form still builds (as an Anthropic connection) rather than failing.
+        assert!(form.build().is_ok());
     }
 
     #[test]
