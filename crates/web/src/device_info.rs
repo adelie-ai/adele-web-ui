@@ -88,6 +88,20 @@ pub use wasm::{
     load_persisted_share_device_info, resolve_browser_context, share_device_info_toggle,
 };
 
+// Host build (tests): there is no browser, so no `localStorage` or `navigator`.
+// The engine calls these two at construction on every target; on the host they
+// degrade to the opt-out default (on) and no resolved context, mirroring the
+// wasm entry points so `engine.rs` stays host-testable (see the module doc).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_persisted_share_device_info() -> bool {
+    SHARE_DEVICE_INFO_DEFAULT
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_browser_context() -> Option<desktop_assistant_api_model::ClientContext> {
+    None
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use leptos::prelude::*;

@@ -123,6 +123,14 @@ pub fn load_persisted_toggle() -> bool {
     LocalStorage::get::<bool>(TOGGLE_KEY).unwrap_or(false)
 }
 
+/// Host build (no `localStorage`): the toggle defaults off, matching a fresh
+/// browser. Present so `ViewSignals::new` — and thus the host-tested `engine` —
+/// compiles off-wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_persisted_toggle() -> bool {
+    false
+}
+
 /// Persist the per-device toggle so it survives reloads.
 #[cfg(target_arch = "wasm32")]
 fn persist_toggle(on: bool) {

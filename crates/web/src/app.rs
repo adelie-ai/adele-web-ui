@@ -198,17 +198,84 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
         }
     });
 
-    let draft = RwSignal::new(String::new());
+    // The composer text is engine-owned (`view.composer`) so the reducer can push
+    // into it — clearing on enqueue and loading a queued message back on recall
+    // (feat/queue-messages) — rather than being a component-local signal the
+    // engine can't reach.
     let on_send = {
         let engine = engine.clone();
         move |ev: SubmitEvent| {
             ev.prevent_default();
-            let text = draft.get();
+            let text = view.composer.get_untracked();
             if text.trim().is_empty() {
                 return;
             }
+            // Capture busy state before the dispatch: a submit never starts a
+            // stream synchronously, so this is the pre-submit truth. While a reply
+            // streams, the reducer QUEUES the text and clears the composer itself
+            // via `SetComposerText`, so we must not clear here (and must not on the
+            // stream-complete auto-flush, which never runs through this handler and
+            // leaves a fresh draft untouched). Idle sends/flushes emit no
+            // `SetComposerText`, so we clear the just-sent text here.
+            let streaming = view.streaming_active.get_untracked();
             engine.borrow_mut().submit_prompt(text);
-            draft.set(String::new());
+            if crate::queue::should_clear_composer_on_submit(streaming) {
+                view.composer.set(String::new());
+            }
+        }
+    };
+
+    // Up/down-arrow recall over the queue (feat/queue-messages). ArrowUp starts a
+    // recall only from an empty composer (never clobber a fresh draft) and then
+    // walks backward through the queued messages; while editing, ArrowUp/ArrowDown
+    // step between queued items, and ArrowDown off the last one cancels back to a
+    // fresh composer. The pure walk decisions live in `crate::queue`.
+    let on_keydown = {
+        let engine = engine.clone();
+        move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
+            "ArrowUp" => {
+                let editing = view.editing_queued.get_untracked();
+                let queue_len = view.queued.with_untracked(Vec::len);
+                let composer_empty = view.composer.with_untracked(|c| c.trim().is_empty());
+                // Not editing: only recall from an empty composer with a queue.
+                // Editing: always walk (the composer holds the checked-out item,
+                // not a fresh draft). The decision is pinned in `crate::queue`.
+                if !crate::queue::should_recall_on_arrow_up(editing, composer_empty, queue_len) {
+                    return;
+                }
+                match crate::queue::recall_up(editing, queue_len) {
+                    crate::queue::RecallAction::Edit(i) => {
+                        ev.prevent_default();
+                        engine.borrow_mut().edit_queued(i);
+                    }
+                    crate::queue::RecallAction::Cancel => {
+                        ev.prevent_default();
+                        engine.borrow_mut().cancel_queued_edit();
+                    }
+                    // At the earliest item (or nothing to recall): while editing,
+                    // swallow the key so it doesn't jump the caret; otherwise let
+                    // the browser handle it.
+                    crate::queue::RecallAction::None => {
+                        if editing.is_some() {
+                            ev.prevent_default();
+                        }
+                    }
+                }
+            }
+            "ArrowDown" => {
+                let editing = view.editing_queued.get_untracked();
+                if editing.is_none() {
+                    return;
+                }
+                let queue_len = view.queued.with_untracked(Vec::len);
+                ev.prevent_default();
+                match crate::queue::recall_down(editing, queue_len) {
+                    crate::queue::RecallAction::Edit(i) => engine.borrow_mut().edit_queued(i),
+                    crate::queue::RecallAction::Cancel => engine.borrow_mut().cancel_queued_edit(),
+                    crate::queue::RecallAction::None => {}
+                }
+            }
+            _ => {}
         }
     };
 
@@ -342,13 +409,19 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
             // composer; hidden until the active conversation reports a reading.
             {context::context_usage_bar(view)}
 
+            // Queued-messages strip (feat/queue-messages): messages submitted
+            // while Adele is busy queue here as chips (edit / remove) until the
+            // reply finishes and the batch flushes as one turn. Hidden when empty.
+            {crate::queue::queued_chips(engine_handle, view)}
+
             <form class="composer" on:submit=on_send>
                 <input
                     type="text"
                     placeholder="Message Adele…"
                     autocomplete="off"
-                    prop:value=move || draft.get()
-                    on:input=move |ev| draft.set(event_target_value(&ev))
+                    prop:value=move || view.composer.get()
+                    on:input=move |ev| view.composer.set(event_target_value(&ev))
+                    on:keydown=on_keydown
                 />
                 <button type="submit" disabled=move || !view.send_enabled.get()>
                     "Send"

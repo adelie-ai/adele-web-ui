@@ -9,11 +9,20 @@
 mod app;
 #[cfg(target_arch = "wasm32")]
 mod auth;
-#[cfg(target_arch = "wasm32")]
+// The reducer-driving engine is host-testable (see its `#[cfg(test)]` module):
+// it owns the view signals and dispatches `UiMessage`s through the shared
+// reducer. On the host build its browser-only WebSocket transport is swapped for
+// a tiny stub — the engine only names the `Transport` type and its
+// `send_command`, and the host tests never open a connection.
+#[cfg(any(target_arch = "wasm32", test))]
 mod engine;
 #[cfg(target_arch = "wasm32")]
 mod settings;
 #[cfg(target_arch = "wasm32")]
+#[path = "transport.rs"]
+mod transport;
+#[cfg(all(not(target_arch = "wasm32"), test))]
+#[path = "transport_stub.rs"]
 mod transport;
 
 // Pure, view-free modules consumed by the UI on wasm and unit-tested on the
@@ -61,6 +70,13 @@ mod model;
 mod personality;
 #[cfg(any(target_arch = "wasm32", test))]
 mod purposes;
+// Message-queuing composer logic (feat/queue-messages): the pure chip-preview
+// truncation + up/down recall-walk decisions are host-tested here; a
+// `#[cfg(target_arch = "wasm32")]` Leptos view renders the queued-chips strip
+// above the composer from the engine's `queued` signal. Queue *state* lives in
+// the shared reducer — this only presents it.
+#[cfg(any(target_arch = "wasm32", test))]
+mod queue;
 // Pure re-auth primitives (issue #42): JWT `exp` classification + the
 // reconnect/auth-bail policy, host-tested here and consumed by `auth`/`app` on
 // wasm.
