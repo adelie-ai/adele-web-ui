@@ -45,3 +45,8 @@ desktop-assistant-ws = { path = "../desktop-assistant/crates/ws-interface" }
 desktop-assistant-client-common = { path = "../desktop-assistant/crates/client-common", default-features = false }
 desktop-assistant-api-model = { path = "../desktop-assistant/crates/api-model" }
 desktop-assistant-auth-jwt = { path = "../desktop-assistant/crates/auth-jwt" }
+# The domain core, for the `CLIENT_CONTEXT` task-local accessor
+# (`ports::transport::current_client_context`) the forward path reads to attach
+# the browser's per-turn client context (#557). Already in the resolved graph
+# via application/ws/client-common — a direct dep, not a new crate.
+desktop-assistant-core = { path = "../desktop-assistant/crates/core" }

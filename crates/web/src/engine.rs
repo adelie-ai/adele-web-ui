@@ -21,10 +21,10 @@ use std::rc::Rc;
 
 use desktop_assistant_api_model::client::{ChatMessage, ConversationSummary};
 use desktop_assistant_api_model::{
-    Command, CommandResult, ConnectionConfigView, ConnectionView, ConversationModelSelectionView,
-    ConversationPersonalityView, EffortLevel, McpServerView, MessageView, ModelListing,
-    PurposeConfigView, PurposeKindApi, PurposesView, ScratchpadNoteView, SendPromptOverride,
-    ServiceAccountView,
+    ClientContext, Command, CommandResult, ConnectionConfigView, ConnectionView,
+    ConversationModelSelectionView, ConversationPersonalityView, EffortLevel, McpServerView,
+    MessageView, ModelListing, PurposeConfigView, PurposeKindApi, PurposesView, ScratchpadNoteView,
+    SendPromptOverride, ServiceAccountView,
 };
 use futures::channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
@@ -265,6 +265,14 @@ pub struct ViewSignals {
     /// `tool_activity::interleave_tool_rows`). Empty when the toggle is off or
     /// between fetches.
     pub tool_activity: RwSignal<Vec<MessageView>>,
+    // --- Share device info (issue #557) --------------------------------------
+    /// Per-device opt-*out*: when true (the default), the SPA attaches the
+    /// browser-scoped client context (timezone + coarse OS, see
+    /// `crate::device_info`) to each `SendMessage` so replies can use the user's
+    /// local time. Persisted in localStorage; read at send time by `spawn_send`.
+    /// The two device fields a browser can honestly know are the only thing ever
+    /// shared — never name / username / home dir / hostname.
+    pub share_device_info: RwSignal<bool>,
 }
 
 impl ViewSignals {
@@ -322,6 +330,7 @@ impl ViewSignals {
             mcp_service_accounts: RwSignal::new(Vec::new()),
             show_tool_activity: RwSignal::new(crate::tool_activity::load_persisted_toggle()),
             tool_activity: RwSignal::new(Vec::new()),
+            share_device_info: RwSignal::new(crate::device_info::load_persisted_share_device_info()),
         }
     }
 }
@@ -339,6 +348,10 @@ pub struct Engine {
     transport: Option<Rc<Transport>>,
     ui_tx: UnboundedSender<UiMessage>,
     label: String,
+    /// The browser-scoped client context (timezone + coarse OS), resolved once at
+    /// construction (#557). Stamped on each `SendMessage` while
+    /// `view.share_device_info` is on; `None` when the browser reports neither.
+    browser_context: Option<ClientContext>,
 }
 
 impl Engine {
@@ -349,6 +362,7 @@ impl Engine {
             transport: None,
             ui_tx,
             label,
+            browser_context: crate::device_info::resolve_browser_context(),
         }
     }
 
@@ -1504,6 +1518,16 @@ impl Engine {
         // the conversation's selection, so later turns inherit it — there is no
         // separate "set model" command.
         let override_selection = self.current_override();
+        // Attach the browser-scoped client context (timezone + coarse OS) while
+        // the "Share device info" toggle is on (#557); read it now, at send time,
+        // so flipping the toggle takes effect on the next message. Off ⇒ send
+        // nothing (the BFF then forwards `client_context: None`).
+        let client_context = self
+            .view
+            .share_device_info
+            .get_untracked()
+            .then(|| self.browser_context.clone())
+            .flatten();
         let tx = self.ui_tx.clone();
         spawn_local(async move {
             let cmd = Command::SendMessage {
@@ -1511,9 +1535,7 @@ impl Engine {
                 content: prompt.clone(),
                 override_selection,
                 system_refinement: system_refinement.unwrap_or_default(),
-                // Per-turn client context (desktop-assistant#557) is not carried
-                // by the SPA send path.
-                client_context: None,
+                client_context,
                 idempotency_key: None,
             };
             match transport.send_command(cmd).await {

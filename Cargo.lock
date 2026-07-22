@@ -13,6 +13,7 @@ dependencies = [
  "desktop-assistant-application",
  "desktop-assistant-auth-jwt",
  "desktop-assistant-client-common",
+ "desktop-assistant-core",
  "desktop-assistant-ws",
  "serde",
  "serde_json",

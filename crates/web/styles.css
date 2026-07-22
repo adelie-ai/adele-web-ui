@@ -924,6 +924,42 @@ button {
   background: var(--accent);
 }
 
+/* Full-width toggle row (Share device info, #557). A tappable switch: label on
+   the left, an On/Off pill on the right that fills with the accent when active. */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  font-size: 15px;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.toggle-label {
+  font-weight: 500;
+}
+
+.toggle-state {
+  min-width: 44px;
+  padding: 4px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--muted);
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.toggle-row.active .toggle-state {
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+
 /* Model list. */
 .model-group {
   margin-bottom: 16px;
