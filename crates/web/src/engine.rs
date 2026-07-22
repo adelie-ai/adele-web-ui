@@ -410,7 +410,16 @@ impl Engine {
     /// Submit composer text as a new turn. The reducer adds the optimistic user
     /// bubble to state, so `sync_view` renders it without extra wiring.
     pub fn submit_prompt(&mut self, prompt: String) {
-        self.dispatch(UiMessage::SubmitPrompt { prompt });
+        // Mint a per-send idempotency key here (#570): the reducer stays
+        // wasm-clean and never generates UUIDs, so the engine supplies one. It
+        // stamps the optimistic bubble and rides the `SendMessage` wire field so
+        // a retry re-attaches to the live turn and the echoed `UserMessageAdded`
+        // dedupes by exact key match. (`uuid`'s `js` feature routes randomness to
+        // the browser's crypto on wasm.)
+        self.dispatch(UiMessage::SubmitPrompt {
+            prompt,
+            idempotency_key: Some(uuid::Uuid::new_v4().to_string()),
+        });
     }
 
     // --- Message queuing (feat/queue-messages) -------------------------------
@@ -690,7 +699,8 @@ impl Engine {
                 conversation_id,
                 prompt,
                 system_refinement,
-            } => self.spawn_send(conversation_id, prompt, system_refinement),
+                idempotency_key,
+            } => self.spawn_send(conversation_id, prompt, system_refinement, idempotency_key),
             Effect::SubscribeConversations(ids) => self.spawn_subscribe(ids),
             // Accessor-less transient effects: reflect directly.
             Effect::SetStatusText(text) | Effect::SetChatStatus(text) => self.view.status.set(text),
@@ -1497,11 +1507,44 @@ impl Engine {
         });
     }
 
+    /// Build the daemon `SendMessage` command for a send, folding in the staged
+    /// model override (issue #9) and the browser-scoped client context (#557),
+    /// both read now — at send time — so a later toggle takes effect on the next
+    /// message. `idempotency_key` is the per-send key minted in
+    /// [`submit_prompt`](Self::submit_prompt) (#570) or `None` for a keyless send;
+    /// it rides the wire field so a retry re-attaches to the live turn and the
+    /// echoed `UserMessageAdded` dedupes by exact key. Pure over `&self`, so the
+    /// wire shape is host-testable without spawning.
+    fn build_send_command(
+        &self,
+        conversation_id: String,
+        prompt: String,
+        system_refinement: Option<String>,
+        idempotency_key: Option<String>,
+    ) -> Command {
+        let override_selection = self.current_override();
+        let client_context = self
+            .view
+            .share_device_info
+            .get_untracked()
+            .then(|| self.browser_context.clone())
+            .flatten();
+        Command::SendMessage {
+            conversation_id,
+            content: prompt,
+            override_selection,
+            system_refinement: system_refinement.unwrap_or_default(),
+            client_context,
+            idempotency_key,
+        }
+    }
+
     fn spawn_send(
         &self,
         conversation_id: String,
         prompt: String,
         system_refinement: Option<String>,
+        idempotency_key: Option<String>,
     ) {
         let Some(transport) = self.transport.clone() else {
             // No live connection: roll the optimistic bubble back out.
@@ -1514,30 +1557,14 @@ impl Engine {
             ));
             return;
         };
-        // Fold in the staged model override (issue #9). The daemon pins it as
-        // the conversation's selection, so later turns inherit it — there is no
-        // separate "set model" command.
-        let override_selection = self.current_override();
-        // Attach the browser-scoped client context (timezone + coarse OS) while
-        // the "Share device info" toggle is on (#557); read it now, at send time,
-        // so flipping the toggle takes effect on the next message. Off ⇒ send
-        // nothing (the BFF then forwards `client_context: None`).
-        let client_context = self
-            .view
-            .share_device_info
-            .get_untracked()
-            .then(|| self.browser_context.clone())
-            .flatten();
+        let cmd = self.build_send_command(
+            conversation_id.clone(),
+            prompt.clone(),
+            system_refinement,
+            idempotency_key,
+        );
         let tx = self.ui_tx.clone();
         spawn_local(async move {
-            let cmd = Command::SendMessage {
-                conversation_id: conversation_id.clone(),
-                content: prompt.clone(),
-                override_selection,
-                system_refinement: system_refinement.unwrap_or_default(),
-                client_context,
-                idempotency_key: None,
-            };
             match transport.send_command(cmd).await {
                 // The turn's events (UserMessageAdded / AssistantDelta / …) stream
                 // separately and carry the correlation; the ack just confirms the
@@ -2031,6 +2058,72 @@ mod tests {
             vec!["b".to_string()],
             "the rest of the queue is untouched"
         );
+    }
+
+    // --- #570: submit_prompt mints a per-send idempotency key that rides onto
+    // the SendMessage the transport ships (was hard-coded `None`). -------------
+
+    #[test]
+    fn submit_prompt_populates_idempotency_key() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, _view) = engine_and_view();
+        engine.dispatch(UiMessage::ConversationLoaded(detail("c1")));
+
+        // An idle send: `submit_prompt` mints the key here (the reducer stays
+        // wasm-clean and never generates UUIDs) and the reducer stamps it on the
+        // optimistic user bubble. Read it back off the transcript — proof the
+        // engine populated a key at all.
+        engine.submit_prompt("hi".to_string());
+        let key = engine
+            .state
+            .current_conversation()
+            .expect("a conversation is open")
+            .messages
+            .last()
+            .expect("submit_prompt drew an optimistic user bubble")
+            .idempotency_key
+            .clone()
+            .expect("submit_prompt must mint an idempotency key (was None before #570)");
+        let parsed = uuid::Uuid::parse_str(&key).expect("the minted key is a valid UUID");
+        assert_eq!(
+            parsed.get_version_num(),
+            4,
+            "the minted idempotency key must be a v4 UUID"
+        );
+
+        // That same key must ride onto the `SendMessage` the transport ships —
+        // the wire field that was the hard-coded `None` this change replaces.
+        match engine.build_send_command("c1".to_string(), "hi".to_string(), None, Some(key.clone()))
+        {
+            Command::SendMessage {
+                idempotency_key, ..
+            } => assert_eq!(
+                idempotency_key,
+                Some(key),
+                "the minted key must be threaded onto the built SendMessage"
+            ),
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_send_command_keyless_leaves_idempotency_key_none() {
+        // Backward-compat: a keyless send path (`None` in) must forward
+        // `idempotency_key: None`, unchanged from before #570 — the daemon then
+        // falls back to request_id/content dedupe.
+        let owner = Owner::new();
+        owner.set();
+        let (engine, _view) = engine_and_view();
+        match engine.build_send_command("c1".to_string(), "hi".to_string(), None, None) {
+            Command::SendMessage {
+                idempotency_key, ..
+            } => assert_eq!(
+                idempotency_key, None,
+                "a keyless send must forward no idempotency key"
+            ),
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
     }
 
     // --- AC9: sync_view must not clobber a live composer draft ----------------

@@ -54,6 +54,14 @@ ammonia = "4"
 # tiny stub (`transport_stub.rs`) so `engine` has a `Transport` type to name.
 leptos = { version = "0.8", features = ["csr"] }
 wasm-bindgen-futures = "0.4"
+# Per-send idempotency keys (#570): `submit_prompt` mints a v4 UUID the reducer
+# stamps on the optimistic bubble and forwards on the `SendMessage` wire field,
+# so a retry re-attaches to the live turn and the echoed `UserMessageAdded`
+# dedupes by exact key. The `js` feature routes `getrandom` to the browser's
+# `crypto.getRandomValues` on `wasm32-unknown-unknown` (REQUIRED — without it the
+# wasm build fails to find a randomness source). Pure on the host too, so the
+# minting is unit-testable in `src/engine.rs`.
+uuid = { version = "1", features = ["v4", "js"] }
 
 # --- Wasm-only dependencies ---------------------------------------------------
 # Excluded from the host build so `cargo test` (native) stays light and the pure

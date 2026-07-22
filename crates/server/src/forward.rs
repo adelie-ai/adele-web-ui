@@ -176,11 +176,16 @@ fn project_turn_event(
             conversation_id,
             request_id,
             content,
+            idempotency_key,
         } if request_id == daemon_request_id => Some((
             api::Event::UserMessageAdded {
                 conversation_id: conversation_id.clone(),
                 request_id: rid(),
                 content: content.clone(),
+                // Forward the daemon's echoed initiating key (#570) unchanged so
+                // the browser dedupes its own optimistic bubble by exact match;
+                // only the correlation id is rewritten to the browser's.
+                idempotency_key: idempotency_key.clone(),
             },
             false,
         )),
@@ -638,6 +643,163 @@ mod tests {
         assert_eq!(
             forwarded_client_context(Some(api::ClientContext::default())),
             None
+        );
+    }
+
+    // --- #570: the browser's SendMessage.idempotency_key must reach the daemon
+    // -------------------------------------------------------------------------
+    //
+    // An end-to-end forwarding check over the *real* UDS transport: a browser
+    // `SendMessage` carrying an idempotency key, fed through `ForwardingHandler`,
+    // must arrive at the daemon-side command with that exact key. It uses an
+    // in-process UDS daemon double (the pattern client-common's `uds_transport`
+    // tests use) whose send handler records the key it receives and then emits a
+    // terminal event so the BFF's event-forwarding loop unblocks and returns.
+
+    use desktop_assistant_client_common::{ConnectionConfig, Connector, TransportMode};
+    use desktop_assistant_uds::{UdsAuthValidator, UdsServer, UdsServerConfig};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// UDS daemon double: capture the `idempotency_key` the dispatcher hands the
+    /// send handler, then emit a terminal `AssistantCompleted` so the forwarding
+    /// loop breaks instead of blocking on the never-ending signal stream.
+    struct CapturingDaemon {
+        captured: Arc<Mutex<Option<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AssistantApiHandler for CapturingDaemon {
+        async fn handle_command(&self, _cmd: api::Command) -> ApiResult<api::CommandResult> {
+            Err(ApiError::Unsupported)
+        }
+
+        async fn handle_send_message(
+            &self,
+            _conversation_id: String,
+            _content: String,
+            _request_id: String,
+            _sink: Arc<dyn EventSink>,
+        ) -> ApiResult<()> {
+            // Unreached: the dispatcher's legacy (no-registry) send path routes
+            // through `handle_send_message_with_override`, overridden below.
+            Ok(())
+        }
+
+        async fn handle_send_message_with_override(
+            &self,
+            conversation_id: String,
+            _content: String,
+            _override_selection: Option<api::SendPromptOverride>,
+            _system_refinement: String,
+            request_id: String,
+            idempotency_key: Option<String>,
+            sink: Arc<dyn EventSink>,
+        ) -> ApiResult<()> {
+            *self.captured.lock().unwrap() = Some(idempotency_key);
+            sink.emit(api::Event::AssistantCompleted {
+                conversation_id,
+                request_id,
+                full_response: String::new(),
+            })
+            .await;
+            Ok(())
+        }
+    }
+
+    /// Accept any handshake token — the test asserts forwarding, not auth.
+    struct AllowAllAuth;
+    #[async_trait::async_trait]
+    impl UdsAuthValidator for AllowAllAuth {
+        async fn validate_bearer_token(&self, _token: &str) -> bool {
+            true
+        }
+    }
+
+    /// Browser-side sink that drops events; the test only cares that the command
+    /// reached the daemon, not what streamed back.
+    struct NoopSink;
+    #[async_trait::async_trait]
+    impl EventSink for NoopSink {
+        async fn emit(&self, _event: api::Event) -> bool {
+            true
+        }
+    }
+
+    async fn wait_for_socket(path: &std::path::Path) {
+        for _ in 0..100 {
+            if path.exists() && tokio::net::UnixStream::connect(path).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("uds socket {path:?} did not appear");
+    }
+
+    #[tokio::test]
+    async fn forwarded_send_message_preserves_idempotency_key() {
+        let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+
+        // The UDS server chmods the socket's PARENT to 0700, so it must be a
+        // directory we own — a fresh subdir of the temp dir, never the shared
+        // temp dir itself.
+        let dir = std::env::temp_dir().join(format!("adele-web-ui-idem-{}", uuid::Uuid::new_v4()));
+        let socket_path = dir.join("d.sock");
+
+        let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
+            captured: Arc::clone(&captured),
+        });
+        let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
+        let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = server
+                .serve_with_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        wait_for_socket(&socket_path).await;
+
+        // The BFF's real Connector over UDS, wrapped in the forwarding handler.
+        let config = ConnectionConfig {
+            transport_mode: TransportMode::Uds,
+            socket_path: Some(socket_path.clone()),
+            ws_jwt: Some("test-token".to_string()),
+            share_client_context: false,
+            ..ConnectionConfig::default()
+        };
+        let connector = Arc::new(Connector::connect(&config).await.expect("connect over uds"));
+        let subs = Arc::new(ConversationSubscriptions::new());
+        let forwarding = ForwardingHandler::new(connector, subs);
+
+        // Feed a browser SendMessage carrying an idempotency key through the BFF.
+        const KEY: &str = "turn-key-abc";
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                "hi".to_string(),
+                None,
+                String::new(),
+                "browser-req-1".to_string(),
+                Some(KEY.to_string()),
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The daemon-side command must carry the browser's exact key.
+        let seen = captured.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            Some(Some(KEY.to_string())),
+            "the browser SendMessage.idempotency_key must reach the daemon-side command"
         );
     }
 }
