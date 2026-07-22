@@ -13,6 +13,7 @@ use desktop_assistant_api_model as api;
 use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_application::{ApiError, ApiResult, AssistantApiHandler, EventSink};
 use desktop_assistant_client_common::{AssistantCommands, Connector, SignalEvent};
+use desktop_assistant_core::ports::transport::current_client_context;
 
 pub struct ForwardingHandler {
     connector: Arc<Connector>,
@@ -91,6 +92,17 @@ impl AssistantApiHandler for ForwardingHandler {
         // Subscribe before sending so no early chunk is missed.
         let mut rx = self.connector.subscribe();
 
+        // Attach the browser's per-turn client context (#557). The embedded
+        // front-door dispatcher installs the browser's `SendMessage.client_context`
+        // as the `CLIENT_CONTEXT` task-local around this call; we read it, narrow
+        // it to the browser-knowable timezone + OS, and forward it on the daemon
+        // `SendMessage`. Reading the per-turn task-local (rather than a per-session
+        // map on this shared handler) keeps the context correctly scoped to THIS
+        // turn's originating session with no shared state to leak — the BFF
+        // multiplexes many browser sessions over one daemon connection, and the
+        // BFF's own connection deliberately shares nothing (adele-web-ui#64).
+        let client_context = forwarded_client_context(current_client_context());
+
         // Forward the streaming SendMessage. The daemon's dispatcher
         // special-cases it (it's rejected by `handle_command`) and replies with
         // a `SendMessageAck` whose `request_id` stamps this turn's events.
@@ -101,7 +113,7 @@ impl AssistantApiHandler for ForwardingHandler {
                 content,
                 override_selection,
                 system_refinement,
-                client_context: None,
+                client_context,
                 idempotency_key,
             })
             .await
@@ -289,11 +301,15 @@ fn browser_conversation_result(
 /// (#557): this is the server-side enforcement of "only timezone + OS ever
 /// cross to the daemon". Returns `None` when nothing browser-scoped remains, so
 /// an empty context forwards `client_context: None`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn browser_scoped_client_context(ctx: &api::ClientContext) -> Option<api::ClientContext> {
-    // STUB (spec): the real narrowing lands in the implementation commit.
-    let _ = ctx;
-    None
+    let scoped = api::ClientContext {
+        timezone: ctx.timezone.clone(),
+        os: ctx.os.clone(),
+        // Everything a browser cannot know is forced absent regardless of what
+        // the browser sent — fail-closed against a spoofed home/username/hostname.
+        ..api::ClientContext::default()
+    };
+    (!scoped.is_empty()).then_some(scoped)
 }
 
 /// The per-turn `client_context` to stamp on the `SendMessage` forwarded to the
@@ -305,7 +321,6 @@ fn browser_scoped_client_context(ctx: &api::ClientContext) -> Option<api::Client
 /// context is narrowed to browser-scoped fields via
 /// [`browser_scoped_client_context`], so nothing false about the daemon host is
 /// ever forwarded.
-#[cfg_attr(not(test), allow(dead_code))]
 fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::ClientContext> {
     current.as_ref().and_then(browser_scoped_client_context)
 }
