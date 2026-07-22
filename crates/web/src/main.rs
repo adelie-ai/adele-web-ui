@@ -29,6 +29,12 @@ mod transport;
 mod connections;
 #[cfg(any(target_arch = "wasm32", test))]
 mod context;
+// Browser-scoped client context (#557): the pure timezone/OS → `ClientContext`
+// mapping is host-tested here; a `#[cfg(target_arch = "wasm32")]` submodule
+// resolves the two browser-knowable fields (Intl timezone + `navigator` OS) and
+// hosts the default-on "Share device info" settings toggle.
+#[cfg(any(target_arch = "wasm32", test))]
+mod device_info;
 // Conversation rename + archive/unarchive for the switcher (issue #49): the pure
 // decision logic (host-tested here) plus its `#[cfg(target_arch = "wasm32")]`
 // row-action / archived-section views over `sidebar`.

@@ -280,6 +280,36 @@ fn browser_conversation_result(
     }
 }
 
+/// Reduce a browser-supplied [`api::ClientContext`] to the fields a browser can
+/// legitimately know — its timezone and a coarse OS — forcing every account /
+/// device field (`real_name` / `username` / `home_dir` / `hostname`) absent.
+///
+/// A browser cannot know those, and the BFF must never let a buggy or hostile
+/// browser spoof the daemon host's identity into a multi-tenant system prompt
+/// (#557): this is the server-side enforcement of "only timezone + OS ever
+/// cross to the daemon". Returns `None` when nothing browser-scoped remains, so
+/// an empty context forwards `client_context: None`.
+#[cfg_attr(not(test), allow(dead_code))]
+fn browser_scoped_client_context(ctx: &api::ClientContext) -> Option<api::ClientContext> {
+    // STUB (spec): the real narrowing lands in the implementation commit.
+    let _ = ctx;
+    None
+}
+
+/// The per-turn `client_context` to stamp on the `SendMessage` forwarded to the
+/// daemon, given the browser's self-reported context for this turn.
+///
+/// `current` is the `CLIENT_CONTEXT` task-local the front-door dispatcher
+/// installs from the browser's `SendMessage.client_context` (#557). `None` in ⇒
+/// `None` out (a turn whose session shared no context forwards none); a present
+/// context is narrowed to browser-scoped fields via
+/// [`browser_scoped_client_context`], so nothing false about the daemon host is
+/// ever forwarded.
+#[cfg_attr(not(test), allow(dead_code))]
+fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::ClientContext> {
+    current.as_ref().and_then(browser_scoped_client_context)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +555,74 @@ mod tests {
             reason: "socket closed".to_string(),
         };
         assert!(project_turn_event(&signal, DAEMON_RID, BROWSER_RID).is_none());
+    }
+
+    // --- Browser-scoped client context (#557) --------------------------------
+
+    /// A context carrying every field, as a hostile/buggy browser might send.
+    fn full_context() -> api::ClientContext {
+        api::ClientContext {
+            real_name: Some("Ada Lovelace".into()),
+            username: Some("ada".into()),
+            home_dir: Some("/home/ada".into()),
+            hostname: Some("analytical-engine".into()),
+            timezone: Some("Europe/London".into()),
+            os: Some("Ubuntu 24.04".into()),
+        }
+    }
+
+    #[test]
+    fn browser_scope_keeps_only_timezone_and_os() {
+        // Acceptance: the BFF constructs a ClientContext with ONLY timezone + OS
+        // set, from the session's supplied values.
+        let scoped = browser_scoped_client_context(&full_context()).expect("some context");
+        assert_eq!(scoped.timezone.as_deref(), Some("Europe/London"));
+        assert_eq!(scoped.os.as_deref(), Some("Ubuntu 24.04"));
+        assert_eq!(scoped.real_name, None, "browser can't know a real name");
+        assert_eq!(scoped.username, None, "browser can't know a username");
+        assert_eq!(scoped.home_dir, None, "browser can't know a home dir");
+        assert_eq!(scoped.hostname, None, "browser can't know a hostname");
+    }
+
+    #[test]
+    fn browser_scope_of_empty_is_none() {
+        assert_eq!(
+            browser_scoped_client_context(&api::ClientContext::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn browser_scope_strips_account_fields_even_without_tz_or_os() {
+        // A context with ONLY spoofed account/device fields narrows to nothing.
+        let spoofed = api::ClientContext {
+            username: Some("root".into()),
+            home_dir: Some("/root".into()),
+            hostname: Some("bff-server".into()),
+            ..api::ClientContext::default()
+        };
+        assert_eq!(browser_scoped_client_context(&spoofed), None);
+    }
+
+    #[test]
+    fn forwarded_context_of_none_is_none() {
+        // Acceptance: a session with no stored context forwards client_context: None.
+        assert_eq!(forwarded_client_context(None), None);
+    }
+
+    #[test]
+    fn forwarded_context_narrows_to_timezone_and_os() {
+        let scoped = forwarded_client_context(Some(full_context())).expect("some context");
+        assert_eq!(scoped.timezone.as_deref(), Some("Europe/London"));
+        assert_eq!(scoped.os.as_deref(), Some("Ubuntu 24.04"));
+        assert!(scoped.username.is_none() && scoped.hostname.is_none());
+    }
+
+    #[test]
+    fn forwarded_context_of_empty_is_none() {
+        assert_eq!(
+            forwarded_client_context(Some(api::ClientContext::default())),
+            None
+        );
     }
 }
