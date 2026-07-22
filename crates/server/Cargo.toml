@@ -26,6 +26,7 @@ desktop-assistant-ws.workspace = true
 desktop-assistant-client-common.workspace = true
 desktop-assistant-api-model.workspace = true
 desktop-assistant-auth-jwt.workspace = true
+desktop-assistant-core.workspace = true
 
 [dev-dependencies]
 # Only for tests: constructing a `SignalEvent::ClientToolCall`'s `serde_json::Value`

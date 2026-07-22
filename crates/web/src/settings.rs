@@ -49,6 +49,7 @@ pub enum SettingsPanel {
     Scratchpad,
     KnowledgeBase,
     Tasks,
+    Device,
 }
 
 impl SettingsPanel {
@@ -63,6 +64,7 @@ impl SettingsPanel {
         SettingsPanel::Scratchpad,
         SettingsPanel::KnowledgeBase,
         SettingsPanel::Tasks,
+        SettingsPanel::Device,
     ];
 
     fn title(self) -> &'static str {
@@ -76,6 +78,7 @@ impl SettingsPanel {
             SettingsPanel::Scratchpad => "Scratchpad",
             SettingsPanel::KnowledgeBase => "Knowledge",
             SettingsPanel::Tasks => "Tasks",
+            SettingsPanel::Device => "Device",
         }
     }
 
@@ -91,6 +94,7 @@ impl SettingsPanel {
             SettingsPanel::Scratchpad => "\u{1f4dd}",        // memo / spiral notepad
             SettingsPanel::KnowledgeBase => "\u{1f4da}",     // books
             SettingsPanel::Tasks => "\u{1f916}",             // robot / background agents
+            SettingsPanel::Device => "\u{1f4bb}",            // laptop
         }
     }
 }
@@ -185,6 +189,7 @@ fn panel_body(panel: SettingsPanel, engine: EngineHandle, view: ViewSignals) -> 
         SettingsPanel::Scratchpad => crate::scratchpad::scratchpad_panel(engine, view).into_any(),
         SettingsPanel::KnowledgeBase => crate::knowledge::knowledge_panel(engine, view).into_any(),
         SettingsPanel::Tasks => crate::tasks::tasks_panel(engine, view).into_any(),
+        SettingsPanel::Device => crate::device_info::share_device_info_toggle(view).into_any(),
     }
 }
 
