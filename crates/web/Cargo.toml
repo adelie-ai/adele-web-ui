@@ -43,18 +43,27 @@ futures = "0.3"
 # (`adele-gtk/src/markdown.rs`), so the sanitizer posture is shared and auditable.
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 ammonia = "4"
+# The reactive core + the async spawn primitive. Kept on *both* targets so the
+# reducer-driving `engine` compiles — and unit-tests — on the host
+# (`#[cfg(any(target_arch = "wasm32", test))]`), like `wire`/`model`: it owns the
+# view `RwSignal`s and its RPC methods name `spawn_local`. Both build cleanly for
+# the host (leptos' web-sys is only linked, never called; the host test build
+# never spawns — the engine's transport stays `None`). The wasm build is
+# unchanged — these were previously wasm-only and behave identically there. The
+# browser-only WebSocket transport stays wasm-only; the host build swaps in a
+# tiny stub (`transport_stub.rs`) so `engine` has a `Transport` type to name.
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen-futures = "0.4"
 
 # --- Wasm-only dependencies ---------------------------------------------------
 # Excluded from the host build so `cargo test` (native) stays light and the pure
-# modules don't drag in leptos/gloo. The UI modules are `#[cfg(target_arch =
-# "wasm32")]`.
+# modules don't drag in the browser-only crates. The UI modules are
+# `#[cfg(target_arch = "wasm32")]`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-leptos = { version = "0.8", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["websocket", "http"] }
-gloo-storage = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
+gloo-storage = "0.3"
 wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
 # `js_sys::Date::now()` for the browser wall clock the pre-emptive expiry check
 # compares `exp` against (issue #42). Already a transitive dep of web-sys/
 # wasm-bindgen — no new crate in the graph.

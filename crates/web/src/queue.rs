@@ -125,6 +125,39 @@ pub fn chip_edit_index(view_index: usize, editing: Option<usize>) -> usize {
     }
 }
 
+/// Whether the composer should be cleared after a submit fires (AC9).
+///
+/// A submit into an *idle* conversation sends immediately, so the just-sent text
+/// is cleared here. A submit while a reply *streams* is QUEUED by the reducer,
+/// which clears the composer itself via `Effect::SetComposerText`; the handler
+/// must NOT also clear, or it would blank a fresh draft the user starts typing
+/// while the reply streams. So: clear iff not streaming. Extracted from the
+/// composer's submit handler (an un-unit-testable Leptos closure) so the
+/// decision is pinned by a host test.
+pub fn should_clear_composer_on_submit(streaming: bool) -> bool {
+    !streaming
+}
+
+/// Whether an ArrowUp keystroke should start/step a queue recall (AC9).
+///
+/// - Editing (`editing.is_some()`): always walk — the composer holds the
+///   checked-out item, not a fresh draft, so ArrowUp steps to the previous item.
+/// - Not editing: recall ONLY from an *empty* composer that has a non-empty
+///   queue, so ArrowUp never clobbers a draft the user is part-way through
+///   typing. Both terms matter: a non-empty draft must block recall even with a
+///   queue present, and an empty composer with no queue has nothing to recall.
+///
+/// Extracted from the composer's keydown closure (wasm-gated, not unit-testable)
+/// so the guard — in particular the `composer_empty` term whose loss would let
+/// ArrowUp overwrite a draft — is pinned by a host test.
+pub fn should_recall_on_arrow_up(
+    editing: Option<usize>,
+    composer_empty: bool,
+    queue_len: usize,
+) -> bool {
+    editing.is_some() || (composer_empty && queue_len > 0)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub use view::queued_chips;
 
@@ -343,5 +376,51 @@ mod tests {
     fn recall_down_single_item_queue_cancels() {
         // One queued item checked out (view len 0, full len 1): down cancels.
         assert_eq!(recall_down(Some(0), 0), RecallAction::Cancel);
+    }
+
+    // --- should_clear_composer_on_submit (AC9) -------------------------------
+
+    #[test]
+    fn submit_while_idle_clears_the_composer() {
+        // Idle send: the just-sent text is cleared by the handler.
+        assert!(should_clear_composer_on_submit(false));
+    }
+
+    #[test]
+    fn submit_while_streaming_preserves_the_composer_draft() {
+        // While a reply streams the send is queued (the reducer clears the
+        // composer via SetComposerText); the handler must NOT also clear, or it
+        // would blank a fresh draft typed during the stream. Dropping this term
+        // (clearing unconditionally) is the AC9 regression this pins.
+        assert!(!should_clear_composer_on_submit(true));
+    }
+
+    // --- should_recall_on_arrow_up (AC9) -------------------------------------
+
+    #[test]
+    fn arrowup_does_not_recall_over_nonempty_draft() {
+        // A non-empty draft with a queue present must NOT recall — losing the
+        // `composer_empty` term would overwrite the draft. This is the exact AC9
+        // regression the guard defends against.
+        assert!(!should_recall_on_arrow_up(None, false, 2));
+    }
+
+    #[test]
+    fn arrowup_recalls_from_empty_composer_with_a_queue() {
+        // Empty composer + a queued message: ArrowUp starts the recall.
+        assert!(should_recall_on_arrow_up(None, true, 2));
+    }
+
+    #[test]
+    fn arrowup_does_not_recall_from_empty_composer_with_empty_queue() {
+        // Nothing queued: there is nothing to recall even from an empty composer.
+        assert!(!should_recall_on_arrow_up(None, true, 0));
+    }
+
+    #[test]
+    fn arrowup_while_editing_always_walks_regardless_of_draft() {
+        // Editing: the composer holds the checked-out item, so ArrowUp walks even
+        // though the composer is "non-empty".
+        assert!(should_recall_on_arrow_up(Some(1), false, 2));
     }
 }

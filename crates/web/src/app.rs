@@ -219,7 +219,7 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
             // `SetComposerText`, so we clear the just-sent text here.
             let streaming = view.streaming_active.get_untracked();
             engine.borrow_mut().submit_prompt(text);
-            if !streaming {
+            if crate::queue::should_clear_composer_on_submit(streaming) {
                 view.composer.set(String::new());
             }
         }
@@ -239,8 +239,8 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
                 let composer_empty = view.composer.with_untracked(|c| c.trim().is_empty());
                 // Not editing: only recall from an empty composer with a queue.
                 // Editing: always walk (the composer holds the checked-out item,
-                // not a fresh draft).
-                if editing.is_none() && !(composer_empty && queue_len > 0) {
+                // not a fresh draft). The decision is pinned in `crate::queue`.
+                if !crate::queue::should_recall_on_arrow_up(editing, composer_empty, queue_len) {
                     return;
                 }
                 match crate::queue::recall_up(editing, queue_len) {

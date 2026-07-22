@@ -9,6 +9,14 @@
 //! and title need no per-effect wiring — only the handful of accessor-less
 //! transient effects (status, send-sensitivity) are reflected directly.
 
+// The engine's full surface is exercised by the wasm UI (`app.rs`). On the host
+// build `app.rs` is absent, so this module is compiled only to unit-test its
+// reducer-driving core (see the `#[cfg(test)]` module below); the methods the
+// queue tests don't reach are not truly dead — they drive the real client — so
+// dead-code is silenced for the host build alone. The wasm clippy gate keeps
+// enforcing it on the target that actually ships.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use std::rc::Rc;
 
 use desktop_assistant_api_model::client::{ChatMessage, ConversationSummary};
@@ -1873,4 +1881,156 @@ fn ack(result: Result<CommandResult, String>, what: &str) -> Result<(), String> 
 
 fn unexpected(command: &str, result: &CommandResult) -> UiMessage {
     UiMessage::Error(format!("unexpected reply to {command}: {result:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Host-target tests for the reducer-driving engine core (message queuing,
+    //! feat/queue-messages). They construct a real [`Engine`] over a fresh Leptos
+    //! reactive owner, drive it with public [`UiMessage`]s, and assert the view
+    //! signals the composer/queued-chips strip render from. No transport is set,
+    //! so every RPC effect early-returns — the reducer's optimistic state is what
+    //! the view reflects, exactly as in the browser before a reply lands.
+
+    use super::*;
+    use desktop_assistant_api_model::client::ConversationDetail;
+    use futures::channel::mpsc;
+    use leptos::prelude::Owner;
+
+    /// A minimal loaded conversation detail (no messages / selection / override).
+    fn detail(id: &str) -> ConversationDetail {
+        ConversationDetail {
+            id: id.to_string(),
+            title: format!("Conversation {id}"),
+            messages: Vec::new(),
+            model_selection: None,
+            conversation_personality: None,
+        }
+    }
+
+    /// A fresh engine + a `Copy` handle to the same view signals, with no
+    /// transport (RPC effects early-return). Must run under a set [`Owner`] so
+    /// the `RwSignal`s allocate — each test sets one first.
+    fn engine_and_view() -> (Engine, ViewSignals) {
+        let view = ViewSignals::new();
+        let (tx, _rx) = mpsc::unbounded::<UiMessage>();
+        (Engine::new(view, tx, "test".to_string()), view)
+    }
+
+    /// Open `c1` and start a streaming turn on it, so a subsequent submit is
+    /// QUEUED rather than sent (the reducer's while-streaming path).
+    fn open_streaming(engine: &mut Engine) {
+        engine.dispatch(UiMessage::ConversationLoaded(detail("c1")));
+        engine.dispatch(UiMessage::PromptSent {
+            task_id: String::new(),
+            conversation_id: "c1".to_string(),
+        });
+    }
+
+    // --- AC1/AC5: editing a queued chip loads it into the composer -----------
+
+    #[test]
+    fn engine_edit_queued_loads_message_into_composer_and_updates_queued_signal() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        open_streaming(&mut engine);
+        assert!(
+            view.streaming_active.get_untracked(),
+            "the turn must be streaming so the submit queues"
+        );
+
+        // Submitting while busy queues the text and the reducer clears the composer.
+        engine.submit_prompt("hello".to_string());
+        assert_eq!(view.queued.get_untracked(), vec!["hello".to_string()]);
+        assert_eq!(view.composer.get_untracked(), "");
+
+        // Editing the chip must load its text into the composer (via
+        // `Effect::SetComposerText` → the `composer` signal) and check it out of
+        // the view queue — NOT delete it (a `RemoveQueued` mis-dispatch would
+        // leave the composer empty and silently drop the message).
+        engine.edit_queued(0);
+        assert_eq!(
+            view.composer.get_untracked(),
+            "hello",
+            "edit_queued must load the queued text into the composer"
+        );
+        assert_eq!(view.editing_queued.get_untracked(), Some(0));
+        assert!(
+            view.queued.get_untracked().is_empty(),
+            "the checked-out item leaves the view queue"
+        );
+    }
+
+    // --- AC8: a completion mid-edit must not drop the checked-out edit --------
+
+    #[test]
+    fn flush_while_editing_queued_preserves_checked_out_edit() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        open_streaming(&mut engine);
+        engine.submit_prompt("a".to_string());
+        engine.submit_prompt("b".to_string());
+        assert_eq!(
+            view.queued.get_untracked(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        // Check out "a" for editing.
+        engine.edit_queued(0);
+        assert_eq!(view.editing_queued.get_untracked(), Some(0));
+        assert_eq!(view.composer.get_untracked(), "a");
+        assert_eq!(view.queued.get_untracked(), vec!["b".to_string()]);
+
+        // The streaming reply completes WHILE the edit is checked out. The flush
+        // must skip (mid-edit), leaving the checked-out edit intact rather than
+        // flushing/dropping it.
+        engine.dispatch(UiMessage::StreamComplete {
+            request_id: "req-1".to_string(),
+            full_response: "reply".to_string(),
+        });
+        assert!(
+            !view.streaming_active.get_untracked(),
+            "the completion must have ended the stream (so the flush path ran)"
+        );
+        assert_eq!(
+            view.editing_queued.get_untracked(),
+            Some(0),
+            "the checked-out edit must survive a completion firing mid-edit"
+        );
+        assert_eq!(
+            view.composer.get_untracked(),
+            "a",
+            "the edit text stays in the composer"
+        );
+        assert_eq!(
+            view.queued.get_untracked(),
+            vec!["b".to_string()],
+            "the rest of the queue is untouched"
+        );
+    }
+
+    // --- AC9: sync_view must not clobber a live composer draft ----------------
+
+    #[test]
+    fn sync_view_preserves_live_composer_draft_across_dispatch() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        engine.dispatch(UiMessage::ConversationLoaded(detail("c1")));
+
+        // The user is part-way through typing a fresh message.
+        view.composer.set("half-typed draft".to_string());
+
+        // An unrelated dispatch (here a live KB change) re-runs `sync_view`. It
+        // deliberately does NOT pull the composer from state — re-deriving it
+        // would blank the live draft the user is typing.
+        engine.dispatch(UiMessage::KnowledgeChanged);
+        assert_eq!(
+            view.composer.get_untracked(),
+            "half-typed draft",
+            "sync_view must leave the live composer draft untouched"
+        );
+    }
 }
