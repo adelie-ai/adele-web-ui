@@ -2108,6 +2108,49 @@ mod tests {
     }
 
     #[test]
+    fn submit_prompt_mints_distinct_keys_per_send() {
+        // Fresh-key distinctness (parity with the gtk client's test): every
+        // `submit_prompt` mints its OWN v4 key, so two independent sends never
+        // collide on the daemon's idempotency dedupe. A shared/constant key would
+        // make the second send re-attach to the first turn instead of starting a
+        // new one.
+        let owner = Owner::new();
+        owner.set();
+
+        let mint_key = |prompt: &str| {
+            let (mut engine, _view) = engine_and_view();
+            engine.dispatch(UiMessage::ConversationLoaded(detail("c1")));
+            engine.submit_prompt(prompt.to_string());
+            engine
+                .state
+                .current_conversation()
+                .expect("a conversation is open")
+                .messages
+                .last()
+                .expect("submit_prompt drew an optimistic user bubble")
+                .idempotency_key
+                .clone()
+                .expect("submit_prompt must mint an idempotency key")
+        };
+
+        let key_a = mint_key("hello");
+        let key_b = mint_key("hello");
+
+        for key in [&key_a, &key_b] {
+            let parsed = uuid::Uuid::parse_str(key).expect("each minted key is a valid UUID");
+            assert_eq!(
+                parsed.get_version_num(),
+                4,
+                "each minted idempotency key must be a v4 UUID"
+            );
+        }
+        assert_ne!(
+            key_a, key_b,
+            "two submit_prompt sends must mint DISTINCT idempotency keys"
+        );
+    }
+
+    #[test]
     fn build_send_command_keyless_leaves_idempotency_key_none() {
         // Backward-compat: a keyless send path (`None` in) must forward
         // `idempotency_key: None`, unchanged from before #570 — the daemon then
