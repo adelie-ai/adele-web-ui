@@ -283,6 +283,15 @@ mod tests {
         assert_eq!(chip_edit_index(1, Some(0)), 2);
     }
 
+    #[test]
+    fn chip_edit_index_editing_last_leaves_earlier_chips_unshifted() {
+        // Full ["a","b","c"], the last item "c" (full-index 2) checked out -> view
+        // ["a"(0),"b"(1)]. Every visible chip sits before the hole, so none shift;
+        // no visible index ever reaches the editing slot (the +1 branch is unused).
+        assert_eq!(chip_edit_index(0, Some(2)), 0);
+        assert_eq!(chip_edit_index(1, Some(2)), 1);
+    }
+
     // --- recall_up (ArrowUp, walk backward) ----------------------------------
 
     #[test]
