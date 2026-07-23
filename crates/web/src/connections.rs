@@ -1,6 +1,7 @@
 //! The Connections settings panel (issue #10): manage LLM-provider connections
-//! (ollama / bedrock / openai / anthropic) — list, create, update, delete, and
-//! set/rotate/clear a connection's write-only credential.
+//! (anthropic / openai / openrouter / azure / google / bedrock / ollama) —
+//! list, create, update, delete, and set/rotate/clear a connection's write-only
+//! credential.
 //!
 //! Split like [`crate::model`] / [`crate::wire`]: the pure form ⇄
 //! [`ConnectionConfigView`] mapping, credential decision, and list-render
@@ -32,17 +33,21 @@ pub enum ConnectorKind {
     Anthropic,
     OpenAi,
     OpenRouter,
+    Azure,
+    Google,
     Bedrock,
     Ollama,
 }
 
 impl ConnectorKind {
-    /// Every kind, in nav/add order. This drives the create picker; Azure and
-    /// Google are config-file-only in v1 and intentionally absent here.
+    /// Every kind, in nav/add order. This drives the create picker; every
+    /// [`ConnectionConfigView`] variant is GUI-creatable.
     pub const ALL: &'static [ConnectorKind] = &[
         Self::Anthropic,
         Self::OpenAi,
         Self::OpenRouter,
+        Self::Azure,
+        Self::Google,
         Self::Bedrock,
         Self::Ollama,
     ];
@@ -53,6 +58,8 @@ impl ConnectorKind {
             Self::Anthropic => "Anthropic",
             Self::OpenAi => "OpenAI",
             Self::OpenRouter => "OpenRouter",
+            Self::Azure => "Azure",
+            Self::Google => "Google",
             Self::Bedrock => "Bedrock",
             Self::Ollama => "Ollama",
         }
@@ -65,6 +72,8 @@ impl ConnectorKind {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
             Self::OpenRouter => "openrouter",
+            Self::Azure => "azure",
+            Self::Google => "google",
             Self::Bedrock => "bedrock",
             Self::Ollama => "ollama",
         }
@@ -90,6 +99,8 @@ impl ConnectorKind {
             Self::Bedrock => "ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]",
             Self::Anthropic | Self::OpenAi => "Paste API key (stored write-only)",
             Self::OpenRouter => "Paste OpenRouter API key (sk-or-...)",
+            Self::Azure => "Paste Azure OpenAI API key (stored write-only)",
+            Self::Google => "Paste Google API key (Gemini API auth mode)",
             Self::Ollama => "",
         }
     }
@@ -142,6 +153,18 @@ impl PreservedFields {
                     max_context_tokens,
                     ..
                 }
+                | ConnectionConfigView::Azure {
+                    connect_timeout_secs,
+                    stream_timeout_secs,
+                    max_context_tokens,
+                    ..
+                }
+                | ConnectionConfigView::Google {
+                    connect_timeout_secs,
+                    stream_timeout_secs,
+                    max_context_tokens,
+                    ..
+                }
                 | ConnectionConfigView::Bedrock {
                     connect_timeout_secs,
                     stream_timeout_secs,
@@ -166,9 +189,8 @@ impl PreservedFields {
                 max_context_tokens: *max_context_tokens,
                 keep_warm: *keep_warm,
             },
-            // The create path (`None`), plus Azure/Google (config-file-only in
-            // v1) and any future variant: no form-surfaced fields to preserve.
-            _ => Self::default(),
+            // The create path: no stored config, so nothing to preserve.
+            None => Self::default(),
         }
     }
 }
@@ -187,6 +209,21 @@ pub struct ConnForm {
     pub api_key_env: String,
     pub aws_profile: String,
     pub region: String,
+    /// Azure: request surface (`v1` GA [default] | `classic`).
+    pub api_surface: String,
+    /// Azure (`api_key` [default] | `entra`) and Google (`vertex` [default] |
+    /// `api_key`) authentication mode. Shared field; the allowed values differ
+    /// per kind and are surfaced by the per-kind dropdown.
+    pub auth_mode: String,
+    /// Azure classic surface: the pinned `api-version` (ignored on the v1 GA
+    /// surface).
+    pub api_version: String,
+    /// Google: the GCP project id.
+    pub project: String,
+    /// Google: the region / location (e.g. `us-central1`).
+    pub location: String,
+    /// Google (Vertex auth mode): path to the service-account JSON credentials.
+    pub credentials_path: String,
     /// Write-only credential input for the single-field (api-key) connectors.
     /// Never populated from a view.
     pub secret: String,
@@ -213,6 +250,12 @@ impl ConnForm {
             api_key_env: String::new(),
             aws_profile: String::new(),
             region: String::new(),
+            api_surface: String::new(),
+            auth_mode: String::new(),
+            api_version: String::new(),
+            project: String::new(),
+            location: String::new(),
+            credentials_path: String::new(),
             secret: String::new(),
             aws_access_key_id: String::new(),
             aws_secret_access_key: String::new(),
@@ -236,49 +279,91 @@ impl ConnForm {
         // mismatch never leaks a value across connector types.
         let matched = config.filter(|c| c.connector_type() == kind.tag());
 
-        let (base_url, api_key_env, aws_profile, region) = match matched {
-            Some(ConnectionConfigView::Anthropic {
-                base_url,
-                api_key_env,
+        // The surfaced (non-secret) inputs, each defaulting to blank; every
+        // config variant fills only the fields it actually carries. Azure adds
+        // the surface/auth/version knobs; Google the project/location/auth/
+        // credentials knobs.
+        let mut base_url = String::new();
+        let mut api_key_env = String::new();
+        let mut aws_profile = String::new();
+        let mut region = String::new();
+        let mut api_surface = String::new();
+        let mut auth_mode = String::new();
+        let mut api_version = String::new();
+        let mut project = String::new();
+        let mut location = String::new();
+        let mut credentials_path = String::new();
+
+        // Clone an echoed `Option<String>` field into a plain owned string.
+        let take = |o: &Option<String>| o.clone().unwrap_or_default();
+        match matched {
+            Some(
+                ConnectionConfigView::Anthropic {
+                    base_url: b,
+                    api_key_env: k,
+                    ..
+                }
+                | ConnectionConfigView::OpenAi {
+                    base_url: b,
+                    api_key_env: k,
+                    ..
+                }
+                | ConnectionConfigView::OpenRouter {
+                    base_url: b,
+                    api_key_env: k,
+                    ..
+                },
+            ) => {
+                base_url = take(b);
+                api_key_env = take(k);
+            }
+            Some(ConnectionConfigView::Azure {
+                base_url: b,
+                api_key_env: k,
+                api_surface: s,
+                auth_mode: a,
+                api_version: v,
                 ..
-            })
-            | Some(ConnectionConfigView::OpenAi {
-                base_url,
-                api_key_env,
+            }) => {
+                base_url = take(b);
+                api_key_env = take(k);
+                api_surface = take(s);
+                auth_mode = take(a);
+                api_version = take(v);
+            }
+            Some(ConnectionConfigView::Google {
+                base_url: b,
+                api_key_env: k,
+                project: pr,
+                location: loc,
+                auth_mode: a,
+                credentials_path: cp,
                 ..
-            })
-            | Some(ConnectionConfigView::OpenRouter {
-                base_url,
-                api_key_env,
-                ..
-            }) => (
-                base_url.clone().unwrap_or_default(),
-                api_key_env.clone().unwrap_or_default(),
-                String::new(),
-                String::new(),
-            ),
+            }) => {
+                base_url = take(b);
+                api_key_env = take(k);
+                project = take(pr);
+                location = take(loc);
+                auth_mode = take(a);
+                credentials_path = take(cp);
+            }
             Some(ConnectionConfigView::Bedrock {
-                aws_profile,
-                region,
-                base_url,
+                aws_profile: prof,
+                region: reg,
+                base_url: b,
                 ..
-            }) => (
-                base_url.clone().unwrap_or_default(),
-                String::new(),
-                aws_profile.clone().unwrap_or_default(),
-                region.clone().unwrap_or_default(),
-            ),
-            Some(ConnectionConfigView::Ollama { base_url, .. }) => (
-                base_url.clone().unwrap_or_default(),
-                String::new(),
-                String::new(),
-                String::new(),
-            ),
-            // `None` (older daemon / create), plus Azure/Google (config-file-only
-            // in v1) and any future variant with no OpenAI-shaped fields to
-            // surface: leave every field blank.
-            _ => (String::new(), String::new(), String::new(), String::new()),
-        };
+            }) => {
+                base_url = take(b);
+                aws_profile = take(prof);
+                region = take(reg);
+            }
+            Some(ConnectionConfigView::Ollama { base_url: b, .. }) => {
+                base_url = take(b);
+            }
+            // `None`: older daemon / the create path, or a config whose variant
+            // did not match the resolved kind. Leave every field blank.
+            None => {}
+        }
 
         Self {
             editing_id: Some(view.id.clone()),
@@ -288,6 +373,12 @@ impl ConnForm {
             api_key_env,
             aws_profile,
             region,
+            api_surface,
+            auth_mode,
+            api_version,
+            project,
+            location,
+            credentials_path,
             secret: String::new(),
             aws_access_key_id: String::new(),
             aws_secret_access_key: String::new(),
@@ -321,9 +412,13 @@ impl ConnForm {
                 self.clear_secret,
             ),
             // The single-field api-key connectors send their raw key as-is.
-            ConnectorKind::Anthropic | ConnectorKind::OpenAi | ConnectorKind::OpenRouter => {
-                credential_action(&self.secret, self.clear_secret)
-            }
+            // Azure (api_key auth) and Google (Gemini-API auth) take a plain key
+            // too; other auth modes simply leave the field blank.
+            ConnectorKind::Anthropic
+            | ConnectorKind::OpenAi
+            | ConnectorKind::OpenRouter
+            | ConnectorKind::Azure
+            | ConnectorKind::Google => credential_action(&self.secret, self.clear_secret),
             // Ollama takes no credential.
             ConnectorKind::Ollama => None,
         };
@@ -365,6 +460,27 @@ impl ConnForm {
             ConnectorKind::OpenRouter => ConnectionConfigView::OpenRouter {
                 base_url: opt(&self.base_url),
                 api_key_env: opt(&self.api_key_env),
+                connect_timeout_secs: p.connect_timeout_secs,
+                stream_timeout_secs: p.stream_timeout_secs,
+                max_context_tokens: p.max_context_tokens,
+            },
+            ConnectorKind::Azure => ConnectionConfigView::Azure {
+                base_url: opt(&self.base_url),
+                api_key_env: opt(&self.api_key_env),
+                api_surface: opt(&self.api_surface),
+                auth_mode: opt(&self.auth_mode),
+                api_version: opt(&self.api_version),
+                connect_timeout_secs: p.connect_timeout_secs,
+                stream_timeout_secs: p.stream_timeout_secs,
+                max_context_tokens: p.max_context_tokens,
+            },
+            ConnectorKind::Google => ConnectionConfigView::Google {
+                base_url: opt(&self.base_url),
+                api_key_env: opt(&self.api_key_env),
+                project: opt(&self.project),
+                location: opt(&self.location),
+                auth_mode: opt(&self.auth_mode),
+                credentials_path: opt(&self.credentials_path),
                 connect_timeout_secs: p.connect_timeout_secs,
                 stream_timeout_secs: p.stream_timeout_secs,
                 max_context_tokens: p.max_context_tokens,
@@ -552,6 +668,12 @@ mod view {
         api_key_env: RwSignal<String>,
         aws_profile: RwSignal<String>,
         region: RwSignal<String>,
+        api_surface: RwSignal<String>,
+        auth_mode: RwSignal<String>,
+        api_version: RwSignal<String>,
+        project: RwSignal<String>,
+        location: RwSignal<String>,
+        credentials_path: RwSignal<String>,
         secret: RwSignal<String>,
         aws_access_key_id: RwSignal<String>,
         aws_secret_access_key: RwSignal<String>,
@@ -578,6 +700,12 @@ mod view {
                 api_key_env: RwSignal::new(String::new()),
                 aws_profile: RwSignal::new(String::new()),
                 region: RwSignal::new(String::new()),
+                api_surface: RwSignal::new(String::new()),
+                auth_mode: RwSignal::new(String::new()),
+                api_version: RwSignal::new(String::new()),
+                project: RwSignal::new(String::new()),
+                location: RwSignal::new(String::new()),
+                credentials_path: RwSignal::new(String::new()),
                 secret: RwSignal::new(String::new()),
                 aws_access_key_id: RwSignal::new(String::new()),
                 aws_secret_access_key: RwSignal::new(String::new()),
@@ -599,6 +727,12 @@ mod view {
             self.api_key_env.set(f.api_key_env);
             self.aws_profile.set(f.aws_profile);
             self.region.set(f.region);
+            self.api_surface.set(f.api_surface);
+            self.auth_mode.set(f.auth_mode);
+            self.api_version.set(f.api_version);
+            self.project.set(f.project);
+            self.location.set(f.location);
+            self.credentials_path.set(f.credentials_path);
             self.secret.set(f.secret);
             self.aws_access_key_id.set(f.aws_access_key_id);
             self.aws_secret_access_key.set(f.aws_secret_access_key);
@@ -630,6 +764,12 @@ mod view {
                 api_key_env: self.api_key_env.get_untracked(),
                 aws_profile: self.aws_profile.get_untracked(),
                 region: self.region.get_untracked(),
+                api_surface: self.api_surface.get_untracked(),
+                auth_mode: self.auth_mode.get_untracked(),
+                api_version: self.api_version.get_untracked(),
+                project: self.project.get_untracked(),
+                location: self.location.get_untracked(),
+                credentials_path: self.credentials_path.get_untracked(),
                 secret: self.secret.get_untracked(),
                 aws_access_key_id: self.aws_access_key_id.get_untracked(),
                 aws_secret_access_key: self.aws_secret_access_key.get_untracked(),
@@ -993,6 +1133,47 @@ mod view {
                 {text_field("API key env var (optional)", form.api_key_env, "e.g. OPENAI_API_KEY")}
             }
             .into_any(),
+            ConnectorKind::Azure => view! {
+                {text_field(
+                    "Resource endpoint (base URL)",
+                    form.base_url,
+                    "https://<resource>.openai.azure.com",
+                )}
+                {text_field("API key env var (optional)", form.api_key_env, "e.g. AZURE_OPENAI_API_KEY")}
+                {select_field(
+                    "API surface",
+                    form.api_surface,
+                    &[("v1", "v1 (GA)"), ("classic", "classic (api-version)")],
+                )}
+                {select_field(
+                    "Auth mode",
+                    form.auth_mode,
+                    &[("api_key", "API key"), ("entra", "Entra ID")],
+                )}
+                {text_field(
+                    "API version (classic surface only)",
+                    form.api_version,
+                    "e.g. 2024-06-01",
+                )}
+            }
+            .into_any(),
+            ConnectorKind::Google => view! {
+                {text_field("Base URL (optional)", form.base_url, "usually blank")}
+                {text_field("API key env var (optional)", form.api_key_env, "e.g. GOOGLE_API_KEY")}
+                {text_field("GCP project (optional)", form.project, "my-gcp-project")}
+                {text_field("Location / region", form.location, "e.g. us-central1")}
+                {select_field(
+                    "Auth mode",
+                    form.auth_mode,
+                    &[("vertex", "Vertex AI (service account)"), ("api_key", "Gemini API key")],
+                )}
+                {text_field(
+                    "Credentials path (Vertex service-account JSON)",
+                    form.credentials_path,
+                    "/path/to/service-account.json",
+                )}
+            }
+            .into_any(),
             ConnectorKind::Bedrock => view! {
                 {text_field("AWS profile (optional)", form.aws_profile, "default")}
                 {text_field("Region", form.region, "us-west-2")}
@@ -1022,6 +1203,45 @@ mod view {
                     prop:value=move || value.get()
                     on:input=move |ev| value.set(event_target_value(&ev))
                 />
+            </div>
+        }
+    }
+
+    /// A labelled `<select>` dropdown bound to `value`, for the enum config
+    /// fields (Azure `api_surface`/`auth_mode`, Google `auth_mode`). `options`
+    /// lists the allowed `(value, label)` pairs, primary first. An untouched
+    /// control shows the primary option and, since the signal stays empty,
+    /// saves `None` — the daemon then applies its own default. Mirrors the
+    /// purpose/personality `<select>` pattern (touch-friendly on phones).
+    fn select_field(
+        label: &'static str,
+        value: RwSignal<String>,
+        options: &'static [(&'static str, &'static str)],
+    ) -> impl IntoView {
+        let default_value = options.first().map(|(v, _)| *v).unwrap_or_default();
+        view! {
+            <div class="field">
+                <label class="field-label">{label}</label>
+                <select
+                    class="select"
+                    aria-label=label
+                    on:change=move |ev| value.set(event_target_value(&ev))
+                >
+                    {move || {
+                        let raw = value.get();
+                        let current = if raw.is_empty() { default_value } else { raw.as_str() };
+                        options
+                            .iter()
+                            .map(|(val, disp)| {
+                                view! {
+                                    <option value=*val selected=*val == current>
+                                        {*disp}
+                                    </option>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </select>
             </div>
         }
     }
@@ -1176,6 +1396,33 @@ mod tests {
         }
     }
 
+    fn azure_config() -> ConnectionConfigView {
+        ConnectionConfigView::Azure {
+            base_url: Some("https://example.openai.azure.com".into()),
+            api_key_env: Some("AZURE_OPENAI_WORK_KEY".into()),
+            api_surface: Some("classic".into()),
+            auth_mode: Some("api_key".into()),
+            api_version: Some("2024-06-01".into()),
+            connect_timeout_secs: None,
+            stream_timeout_secs: None,
+            max_context_tokens: None,
+        }
+    }
+
+    fn google_config() -> ConnectionConfigView {
+        ConnectionConfigView::Google {
+            base_url: None,
+            api_key_env: Some("GOOGLE_WORK_KEY".into()),
+            project: Some("my-gcp-project".into()),
+            location: Some("us-central1".into()),
+            auth_mode: Some("vertex".into()),
+            credentials_path: Some("/etc/adele/sa.json".into()),
+            connect_timeout_secs: None,
+            stream_timeout_secs: None,
+            max_context_tokens: None,
+        }
+    }
+
     fn view(id: &str, ty: &str, config: Option<ConnectionConfigView>) -> ConnectionView {
         ConnectionView {
             id: id.into(),
@@ -1198,11 +1445,13 @@ mod tests {
     }
 
     #[test]
-    fn connector_kind_all_covers_five_variants() {
-        // Anthropic, OpenAI, OpenRouter, Bedrock, Ollama. Azure/Google are
-        // config-file-only in v1 and intentionally not in the create picker.
-        assert_eq!(ConnectorKind::ALL.len(), 5);
+    fn connector_kind_all_covers_seven_variants() {
+        // Every ConnectionConfigView variant is GUI-creatable: Anthropic,
+        // OpenAI, OpenRouter, Azure, Google, Bedrock, Ollama.
+        assert_eq!(ConnectorKind::ALL.len(), 7);
         assert!(ConnectorKind::ALL.contains(&ConnectorKind::OpenRouter));
+        assert!(ConnectorKind::ALL.contains(&ConnectorKind::Azure));
+        assert!(ConnectorKind::ALL.contains(&ConnectorKind::Google));
     }
 
     #[test]
@@ -1210,6 +1459,8 @@ mod tests {
         assert_eq!(ConnectorKind::Anthropic.label(), "Anthropic");
         assert_eq!(ConnectorKind::OpenAi.label(), "OpenAI");
         assert_eq!(ConnectorKind::OpenRouter.label(), "OpenRouter");
+        assert_eq!(ConnectorKind::Azure.label(), "Azure");
+        assert_eq!(ConnectorKind::Google.label(), "Google");
         assert_eq!(ConnectorKind::Bedrock.label(), "Bedrock");
         assert_eq!(ConnectorKind::Ollama.label(), "Ollama");
     }
@@ -1224,10 +1475,23 @@ mod tests {
     }
 
     #[test]
+    fn azure_and_google_tags_round_trip() {
+        assert_eq!(ConnectorKind::Azure.tag(), "azure");
+        assert_eq!(ConnectorKind::from_tag("azure"), Some(ConnectorKind::Azure));
+        assert_eq!(ConnectorKind::Google.tag(), "google");
+        assert_eq!(
+            ConnectorKind::from_tag("google"),
+            Some(ConnectorKind::Google)
+        );
+    }
+
+    #[test]
     fn accepts_credential_excludes_only_ollama() {
         assert!(ConnectorKind::Anthropic.accepts_credential());
         assert!(ConnectorKind::OpenAi.accepts_credential());
         assert!(ConnectorKind::OpenRouter.accepts_credential());
+        assert!(ConnectorKind::Azure.accepts_credential());
+        assert!(ConnectorKind::Google.accepts_credential());
         assert!(ConnectorKind::Bedrock.accepts_credential());
         assert!(!ConnectorKind::Ollama.accepts_credential());
     }
@@ -1469,6 +1733,99 @@ mod tests {
     }
 
     #[test]
+    fn build_azure_config_and_id() {
+        let mut form = ConnForm::blank(ConnectorKind::Azure);
+        form.id = "az".into();
+        form.base_url = "https://example.openai.azure.com".into();
+        form.api_key_env = "AZURE_OPENAI_API_KEY".into();
+        form.api_surface = "classic".into();
+        form.auth_mode = "api_key".into();
+        form.api_version = "2024-06-01".into();
+        form.secret = "azure-key".into();
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.editing_id, None);
+        assert_eq!(built.id, "az");
+        match built.config {
+            ConnectionConfigView::Azure {
+                base_url,
+                api_key_env,
+                api_surface,
+                auth_mode,
+                api_version,
+                ..
+            } => {
+                assert_eq!(
+                    base_url.as_deref(),
+                    Some("https://example.openai.azure.com")
+                );
+                assert_eq!(api_key_env.as_deref(), Some("AZURE_OPENAI_API_KEY"));
+                assert_eq!(api_surface.as_deref(), Some("classic"));
+                assert_eq!(auth_mode.as_deref(), Some("api_key"));
+                assert_eq!(api_version.as_deref(), Some("2024-06-01"));
+            }
+            other => panic!("expected Azure, got {other:?}"),
+        }
+        // Azure (api_key auth) carries a plain API-key credential.
+        assert_eq!(
+            built.credential,
+            Some(CredentialAction::Set("azure-key".into()))
+        );
+    }
+
+    #[test]
+    fn build_azure_blank_enum_fields_are_none() {
+        // An untouched dropdown leaves the enum field empty, which serializes to
+        // `None` so the daemon applies its own default (v1 / api_key).
+        let mut form = ConnForm::blank(ConnectorKind::Azure);
+        form.id = "az".into();
+        let built = form.build().expect("valid form builds");
+        match built.config {
+            ConnectionConfigView::Azure {
+                api_surface,
+                auth_mode,
+                api_version,
+                ..
+            } => {
+                assert_eq!(api_surface, None);
+                assert_eq!(auth_mode, None);
+                assert_eq!(api_version, None);
+            }
+            other => panic!("expected Azure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_google_config_and_id() {
+        let mut form = ConnForm::blank(ConnectorKind::Google);
+        form.id = "gemini".into();
+        form.api_key_env = "GOOGLE_API_KEY".into();
+        form.project = "my-gcp-project".into();
+        form.location = "us-central1".into();
+        form.auth_mode = "vertex".into();
+        form.credentials_path = "/etc/adele/sa.json".into();
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.editing_id, None);
+        assert_eq!(built.id, "gemini");
+        match built.config {
+            ConnectionConfigView::Google {
+                api_key_env,
+                project,
+                location,
+                auth_mode,
+                credentials_path,
+                ..
+            } => {
+                assert_eq!(api_key_env.as_deref(), Some("GOOGLE_API_KEY"));
+                assert_eq!(project.as_deref(), Some("my-gcp-project"));
+                assert_eq!(location.as_deref(), Some("us-central1"));
+                assert_eq!(auth_mode.as_deref(), Some("vertex"));
+                assert_eq!(credentials_path.as_deref(), Some("/etc/adele/sa.json"));
+            }
+            other => panic!("expected Google, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_anthropic_config() {
         let mut form = ConnForm::blank(ConnectorKind::Anthropic);
         form.id = "claude".into();
@@ -1662,30 +2019,126 @@ mod tests {
     }
 
     #[test]
-    fn from_view_folds_azure_into_blank_form_without_panic() {
-        // Azure/Google are config-file-only in v1: the create picker never
-        // offers them, and `from_tag` doesn't know their tags — so a Configure
-        // click on such a connection must not panic. It falls back to a usable
-        // (Anthropic-kind) blank form, and PreservedFields stays all-None.
+    fn from_view_prefills_azure_and_round_trips() {
+        let form = ConnForm::from_view(&view("az", "azure", Some(azure_config())));
+        assert_eq!(form.editing_id.as_deref(), Some("az"));
+        assert_eq!(form.id, "az");
+        assert_eq!(form.kind, ConnectorKind::Azure);
+        assert_eq!(form.base_url, "https://example.openai.azure.com");
+        assert_eq!(form.api_key_env, "AZURE_OPENAI_WORK_KEY");
+        assert_eq!(form.api_surface, "classic");
+        assert_eq!(form.auth_mode, "api_key");
+        assert_eq!(form.api_version, "2024-06-01");
+        // The stored secret is never echoed into the form.
+        assert_eq!(form.secret, "");
+        // Round-trip: an edit save rebuilds the Azure config unchanged.
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.editing_id.as_deref(), Some("az"));
+        match built.config {
+            ConnectionConfigView::Azure {
+                base_url,
+                api_key_env,
+                api_surface,
+                auth_mode,
+                api_version,
+                ..
+            } => {
+                assert_eq!(
+                    base_url.as_deref(),
+                    Some("https://example.openai.azure.com")
+                );
+                assert_eq!(api_key_env.as_deref(), Some("AZURE_OPENAI_WORK_KEY"));
+                assert_eq!(api_surface.as_deref(), Some("classic"));
+                assert_eq!(auth_mode.as_deref(), Some("api_key"));
+                assert_eq!(api_version.as_deref(), Some("2024-06-01"));
+            }
+            other => panic!("expected Azure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_view_prefills_google_and_round_trips() {
+        let form = ConnForm::from_view(&view("gemini", "google", Some(google_config())));
+        assert_eq!(form.editing_id.as_deref(), Some("gemini"));
+        assert_eq!(form.id, "gemini");
+        assert_eq!(form.kind, ConnectorKind::Google);
+        assert_eq!(form.base_url, "");
+        assert_eq!(form.api_key_env, "GOOGLE_WORK_KEY");
+        assert_eq!(form.project, "my-gcp-project");
+        assert_eq!(form.location, "us-central1");
+        assert_eq!(form.auth_mode, "vertex");
+        assert_eq!(form.credentials_path, "/etc/adele/sa.json");
+        assert_eq!(form.secret, "");
+        // Round-trip: an edit save rebuilds the Google config unchanged.
+        let built = form.build().expect("valid form builds");
+        assert_eq!(built.editing_id.as_deref(), Some("gemini"));
+        match built.config {
+            ConnectionConfigView::Google {
+                base_url,
+                api_key_env,
+                project,
+                location,
+                auth_mode,
+                credentials_path,
+                ..
+            } => {
+                assert_eq!(base_url, None);
+                assert_eq!(api_key_env.as_deref(), Some("GOOGLE_WORK_KEY"));
+                assert_eq!(project.as_deref(), Some("my-gcp-project"));
+                assert_eq!(location.as_deref(), Some("us-central1"));
+                assert_eq!(auth_mode.as_deref(), Some("vertex"));
+                assert_eq!(credentials_path.as_deref(), Some("/etc/adele/sa.json"));
+            }
+            other => panic!("expected Google, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_view_azure_config_mismatch_leaves_blank() {
+        // A view tagged `azure` but carrying an OpenAI-shaped config must not
+        // leak the mismatched fields: the resolved kind is Azure, the config
+        // variant doesn't match, so every surfaced field stays blank.
+        let form = ConnForm::from_view(&view("az", "azure", Some(openai_config())));
+        assert_eq!(form.kind, ConnectorKind::Azure);
+        assert_eq!(form.base_url, "");
+        assert_eq!(form.api_key_env, "");
+        assert_eq!(form.api_surface, "");
+        assert_eq!(form.preserved, PreservedFields::default());
+    }
+
+    #[test]
+    fn preserved_fields_from_azure_and_google() {
         let azure = ConnectionConfigView::Azure {
-            base_url: Some("https://example.openai.azure.com".into()),
-            api_key_env: Some("AZURE_OPENAI_KEY".into()),
-            api_surface: Some("chat".into()),
-            auth_mode: Some("api_key".into()),
-            api_version: Some("2024-06-01".into()),
+            base_url: None,
+            api_key_env: None,
+            api_surface: None,
+            auth_mode: None,
+            api_version: None,
             connect_timeout_secs: Some(7),
             stream_timeout_secs: Some(90),
             max_context_tokens: Some(128_000),
         };
-        let form = ConnForm::from_view(&view("az", "azure", Some(azure)));
-        // Unknown connector tag -> Anthropic fallback, no config match -> blanks.
-        assert_eq!(form.kind, ConnectorKind::Anthropic);
-        assert_eq!(form.id, "az");
-        assert_eq!(form.base_url, "");
-        assert_eq!(form.api_key_env, "");
-        assert_eq!(form.preserved, PreservedFields::default());
-        // The form still builds (as an Anthropic connection) rather than failing.
-        assert!(form.build().is_ok());
+        let p = PreservedFields::from_config(Some(&azure));
+        assert_eq!(p.connect_timeout_secs, Some(7));
+        assert_eq!(p.stream_timeout_secs, Some(90));
+        assert_eq!(p.max_context_tokens, Some(128_000));
+        assert_eq!(p.keep_warm, None);
+
+        let google = ConnectionConfigView::Google {
+            base_url: None,
+            api_key_env: None,
+            project: None,
+            location: None,
+            auth_mode: None,
+            credentials_path: None,
+            connect_timeout_secs: Some(3),
+            stream_timeout_secs: None,
+            max_context_tokens: Some(1_000_000),
+        };
+        let g = PreservedFields::from_config(Some(&google));
+        assert_eq!(g.connect_timeout_secs, Some(3));
+        assert_eq!(g.max_context_tokens, Some(1_000_000));
+        assert_eq!(g.keep_warm, None);
     }
 
     #[test]
