@@ -32,6 +32,10 @@ desktop-assistant-core.workspace = true
 # Only for tests: constructing a `SignalEvent::ClientToolCall`'s `serde_json::Value`
 # arguments to assert it is NOT relayed. The BFF proper carries no JSON of its own.
 serde_json.workspace = true
+# Only for tests: an in-process UDS daemon double the forwarding test connects a
+# real `Connector` to, so `SendMessage.idempotency_key` (#570) is asserted at the
+# daemon side over the actual transport rather than a hand-rolled stand-in.
+desktop-assistant-uds.workspace = true
 
 [lints]
 workspace = true
