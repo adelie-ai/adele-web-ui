@@ -342,6 +342,7 @@ mod tests {
             id: String::new(),
             role: role.to_string(),
             content: content.to_string(),
+            idempotency_key: None,
         }
     }
 

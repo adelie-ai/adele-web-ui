@@ -496,6 +496,7 @@ mod tests {
                 context_limit: None,
                 capabilities: ModelCapabilitiesView::default(),
             },
+            notices: Vec::new(),
         }
     }
 

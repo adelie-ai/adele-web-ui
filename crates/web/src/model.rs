@@ -100,6 +100,7 @@ mod tests {
                     ..Default::default()
                 },
             },
+            notices: Vec::new(),
         }
     }
 
