@@ -426,6 +426,8 @@ mod tests {
             children: vec![],
             title: "Research".to_string(),
             progress_hint: None,
+            owner_todo: String::new(),
+            spawn_marker: None,
         }
     }
 
