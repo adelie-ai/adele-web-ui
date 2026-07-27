@@ -8,6 +8,11 @@
 //! after every dispatch (the tui's model), so the message list, streaming text,
 //! and title need no per-effect wiring — only the handful of accessor-less
 //! transient effects (status, send-sensitivity) are reflected directly.
+//!
+//! [`Engine::run_effect`] matches `Effect` exhaustively and reports a
+//! [`Disposition`] for each one, so an effect this client does not act on says
+//! why rather than vanishing, and a new variant upstream is a build error (see
+//! [`crate::effects`]).
 
 // The engine's full surface is exercised by the wasm UI (`app.rs`). On the host
 // build `app.rs` is absent, so this module is compiled only to unit-test its
@@ -36,6 +41,7 @@ use client_ui_common::{
 };
 
 use crate::connections::{CredentialAction, secret_command};
+use crate::effects::Disposition;
 use crate::model;
 use crate::transport::Transport;
 
@@ -689,7 +695,18 @@ impl Engine {
             .set(self.state.editing_queued_index());
     }
 
-    fn run_effect(&mut self, effect: Effect) {
+    /// Perform one reducer [`Effect`], reporting what became of it.
+    ///
+    /// Matched **exhaustively on purpose**: a client mirrors the shared
+    /// reducer's effects into its own view by hand, so an effect that falls
+    /// through a `_` arm is a silent no-op — exactly how every error and status
+    /// string went missing here (issue #73). Without a catch-all, a new variant
+    /// in `client-ui-common` is a build error, and every variant this client
+    /// does drop says why. `crate::effects::census` keeps the coverage test's
+    /// sample list in step.
+    fn run_effect(&mut self, effect: Effect) -> Disposition {
+        // Performed below; anything the web client deliberately drops falls to
+        // the `Ignored` arms at the bottom, each carrying its reason.
         match effect {
             Effect::EnsureActiveConversation => self.ensure_active_conversation(),
             Effect::LoadConversation(id) => self.spawn_get_conversation(id, false),
@@ -702,7 +719,16 @@ impl Engine {
                 idempotency_key,
             } => self.spawn_send(conversation_id, prompt, system_refinement, idempotency_key),
             Effect::SubscribeConversations(ids) => self.spawn_subscribe(ids),
-            // Accessor-less transient effects: reflect directly.
+            // Accessor-less transient effects: reflect directly. The status
+            // signal is what `crate::status` paints above the composer — the
+            // client's only channel for a provider error, a dropped connection,
+            // a send that never left, or a long tool loop's progress. GTK and
+            // the TUI give the transient chat status its own widget; a phone
+            // viewport gets ONE line, which is safe because the reducer clears
+            // the chat status at each turn boundary and always writes an error
+            // *after* that clear — a failure is never wiped by the turn that
+            // produced it, and a stale one goes when the next reply's first
+            // chunk arrives.
             Effect::SetStatusText(text) | Effect::SetChatStatus(text) => self.view.status.set(text),
             Effect::ClearChatStatus => self.view.status.set(String::new()),
             Effect::SetSendSensitive(enabled) => self.view.send_enabled.set(enabled),
@@ -757,18 +783,64 @@ impl Engine {
             // terminal `Completed`/`Failed`/`Cancelled` status. Re-fetch the
             // authoritative snapshot so the finished task shows its real status
             // and stays visible as "recent", but only once the panel has been
-            // opened (the guard: a never-opened panel does no work — an
-            // un-guarded completion falls through to the `_` arm below).
-            // `RefreshSidePaneTasks` is a GTK conversation-side-pane concern with
-            // no web analogue and is likewise ignored there.
-            Effect::TaskCompleted { .. } if self.view.tasks_loaded.get_untracked() => {
+            // opened: a never-opened panel has nothing to refresh.
+            Effect::TaskCompleted { .. } => {
+                if !self.view.tasks_loaded.get_untracked() {
+                    return Disposition::Ignored(
+                        "the tasks panel has never been opened, so there is no list to refresh",
+                    );
+                }
                 self.refresh_tasks()
             }
-            // The message list, streaming buffer, per-task logs, voice, and
-            // client-tool effects are either re-derived in `sync_view` or out of
-            // scope. Deliberately ignored.
-            _ => {}
+
+            // --- Deliberately not acted on -----------------------------------
+            //
+            // Each arm states why dropping it loses nothing. Adding a variant to
+            // `client_ui_common::Effect` without deciding which side of this line
+            // it falls on is a build error, not a new silent no-op.
+            Effect::LoadConversationIntoChat(_)
+            | Effect::ClearChat
+            | Effect::AddUserMessage(_)
+            | Effect::ReceiveChunk(_)
+            | Effect::CompleteStreaming(_)
+            | Effect::SetQueuedMessages { .. } => {
+                return Disposition::Ignored(
+                    "the transcript, streaming buffer and queued list are re-derived from \
+                     WindowState in sync_view after every dispatch",
+                );
+            }
+            Effect::ClearClient => {
+                return Disposition::Ignored(
+                    "app.rs's session loop owns the transport handle and clears it itself \
+                     when the socket drops",
+                );
+            }
+            Effect::RefreshSidePaneTasks => {
+                return Disposition::Ignored(
+                    "a GTK conversation-side-pane concern; the web tasks panel renders the \
+                     flat list the Task* effects above maintain",
+                );
+            }
+            Effect::TaskLogAppended { .. } => {
+                return Disposition::Ignored(
+                    "the BFF never relays per-task logs to the browser (server relay.rs) and \
+                     the panel shows status/progress, not logs",
+                );
+            }
+            Effect::Speak(_)
+            | Effect::AddLocalMessage { .. }
+            | Effect::SetAdeleOutputDropdown(_)
+            | Effect::SubmitClientToolResult { .. } => {
+                return Disposition::Ignored(
+                    "the daemon's voice channel: the SPA never dispatches SetAdeleOutput and \
+                     the BFF never relays ClientToolCall to the browser (server relay.rs — \
+                     the SPA is not an MCP host), so every conversation's level stays \
+                     Disabled and the reducer emits none of these here; browser read-aloud \
+                     speaks from last_completed_reply instead (crate::read_aloud)",
+                );
+            }
         }
+        Disposition::Handled
     }
 
     // --- Model selection (issue #9) ------------------------------------------
@@ -1966,6 +2038,29 @@ mod tests {
         (Engine::new(view, tx, "test".to_string()), view)
     }
 
+    /// As [`engine_and_view`], but keeps the engine's own `UiMessage` channel
+    /// open so a test can feed back what the engine queues to itself (the
+    /// error/status messages the RPC paths emit). Drain it with [`drain`].
+    fn engine_view_and_inbox() -> (Engine, ViewSignals, mpsc::UnboundedReceiver<UiMessage>) {
+        let view = ViewSignals::new();
+        let (tx, rx) = mpsc::unbounded::<UiMessage>();
+        (Engine::new(view, tx, "test".to_string()), view, rx)
+    }
+
+    /// Apply everything the engine has queued back to itself, in order — the
+    /// host-test stand-in for `app.rs`'s engine loop.
+    fn drain(engine: &mut Engine, inbox: &mut mpsc::UnboundedReceiver<UiMessage>) {
+        while let Ok(msg) = inbox.try_recv() {
+            engine.dispatch(msg);
+        }
+    }
+
+    /// The status line the chat screen would paint right now, or `None` when it
+    /// renders nothing.
+    fn rendered_status(view: ViewSignals) -> Option<crate::status::StatusLine> {
+        crate::status::status_line(&view.status.get_untracked())
+    }
+
     /// Open `c1` and start a streaming turn on it, so a subsequent submit is
     /// QUEUED rather than sent (the reducer's while-streaming path).
     fn open_streaming(engine: &mut Engine) {
@@ -2189,6 +2284,216 @@ mod tests {
             view.composer.get_untracked(),
             "half-typed draft",
             "sync_view must leave the live composer draft untouched"
+        );
+    }
+
+    // --- Issue #73: every status the reducer produces reaches the screen ------
+    //
+    // The engine wrote every error and progress string into `view.status` and
+    // no component read it, so a failed turn ended in silence: the streaming
+    // bubble vanished with no text at all. These pin the whole path —
+    // daemon event → reducer effect → engine signal → a line the chat screen
+    // renders (`crate::status::status_line`, which `app.rs` paints).
+
+    #[test]
+    fn provider_error_reaches_a_rendered_status_line() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        open_streaming(&mut engine);
+
+        engine.dispatch(UiMessage::StreamError {
+            request_id: "req-1".to_string(),
+            error: "429 Too Many Requests".to_string(),
+        });
+
+        assert!(
+            !view.streaming_active.get_untracked(),
+            "the failed turn's streaming bubble is gone — the reason must be shown instead"
+        );
+        let line = rendered_status(view).expect("a failed turn must leave user-visible text");
+        assert_eq!(line.text, "Error: 429 Too Many Requests");
+        assert_eq!(line.kind, crate::status::StatusKind::Failure);
+    }
+
+    #[test]
+    fn disconnect_reaches_a_rendered_status_line() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        engine.dispatch(UiMessage::ConversationLoaded(detail("c1")));
+
+        engine.dispatch(UiMessage::Disconnected {
+            reason: "socket closed".to_string(),
+        });
+
+        assert!(!view.connected.get_untracked());
+        let line = rendered_status(view).expect("a dropped connection must be visible");
+        assert_eq!(line.text, "Disconnected: socket closed");
+        assert_eq!(line.kind, crate::status::StatusKind::Failure);
+    }
+
+    #[test]
+    fn offline_send_failure_reaches_a_rendered_status_line() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view, mut inbox) = engine_view_and_inbox();
+        engine.dispatch(UiMessage::ConversationLoaded(detail("c1")));
+
+        // No transport: the send rolls back and the engine queues its own
+        // "message not sent" error to itself.
+        engine.submit_prompt("hi".to_string());
+        drain(&mut engine, &mut inbox);
+
+        let line = rendered_status(view).expect("a send that never left must be visible");
+        assert_eq!(line.kind, crate::status::StatusKind::Failure);
+        assert!(
+            line.text.contains("message not sent"),
+            "the shown text must say the message did not go out: {:?}",
+            line.text
+        );
+        assert!(
+            line.text.contains("your text is preserved"),
+            "the shown text must say the draft survived: {:?}",
+            line.text
+        );
+    }
+
+    #[test]
+    fn turn_progress_reaches_a_rendered_status_line() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        open_streaming(&mut engine);
+
+        engine.dispatch(UiMessage::AssistantStatus {
+            request_id: "req-1".to_string(),
+            message: "Searching knowledge base…".to_string(),
+        });
+
+        let line = rendered_status(view).expect("a long tool loop must show what it is doing");
+        assert_eq!(line.text, "Searching knowledge base…");
+        assert_eq!(line.kind, crate::status::StatusKind::Progress);
+    }
+
+    #[test]
+    fn empty_provider_error_text_still_shows_a_failure_line() {
+        // A provider that fails with no message must still leave *something*
+        // visible — an empty `error` field cannot collapse back into silence.
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        open_streaming(&mut engine);
+
+        engine.dispatch(UiMessage::StreamError {
+            request_id: "req-1".to_string(),
+            error: String::new(),
+        });
+
+        let line = rendered_status(view).expect("even a message-less failure must be visible");
+        assert_eq!(line.kind, crate::status::StatusKind::Failure);
+        assert!(!line.text.is_empty());
+    }
+
+    #[test]
+    fn stale_error_line_is_replaced_when_the_next_turn_starts() {
+        // The web client shows one status line, so an error must not sit over a
+        // healthy turn: the reducer clears the line as the next reply's first
+        // chunk arrives.
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        open_streaming(&mut engine);
+        engine.dispatch(UiMessage::StreamError {
+            request_id: "req-1".to_string(),
+            error: "429 Too Many Requests".to_string(),
+        });
+        assert!(rendered_status(view).is_some(), "the error is showing");
+
+        engine.dispatch(UiMessage::PromptSent {
+            task_id: String::new(),
+            conversation_id: "c1".to_string(),
+        });
+        engine.dispatch(UiMessage::StreamChunk {
+            request_id: "req-2".to_string(),
+            chunk: "hello".to_string(),
+        });
+
+        assert_eq!(
+            rendered_status(view),
+            None,
+            "the previous turn's error must not linger over a healthy reply"
+        );
+    }
+
+    #[test]
+    fn completed_turn_clears_the_rendered_status_line() {
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        open_streaming(&mut engine);
+        engine.dispatch(UiMessage::AssistantStatus {
+            request_id: "req-1".to_string(),
+            message: "Searching knowledge base…".to_string(),
+        });
+        assert!(rendered_status(view).is_some());
+
+        engine.dispatch(UiMessage::StreamComplete {
+            request_id: "req-1".to_string(),
+            full_response: "the answer".to_string(),
+        });
+
+        assert_eq!(
+            rendered_status(view),
+            None,
+            "a finished turn must not leave its progress line behind"
+        );
+    }
+
+    // --- Issue #73: close the class, not just the instance -------------------
+
+    #[test]
+    fn every_reducer_effect_is_rendered_or_ignored_with_a_stated_reason() {
+        // Each client mirrors the shared reducer's effects into its own view by
+        // hand, so an effect no arm matches is a silent no-op. The executor
+        // matches `Effect` exhaustively (the compiler catches a NEW variant);
+        // this catches the other half — an effect dropped without saying why.
+        let owner = Owner::new();
+        owner.set();
+        for effect in crate::effects::census::every_variant() {
+            let label = format!("{effect:?}");
+            let (mut engine, _view) = engine_and_view();
+            if let Disposition::Ignored(reason) = engine.run_effect(effect) {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{label} is dropped by the web engine with no stated reason — \
+                     an unhandled effect is a silent no-op (issue #73)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn task_completion_is_handled_once_the_tasks_panel_has_loaded() {
+        // The one conditional disposition: a completion is re-fetched only after
+        // the panel has been opened, and is a stated no-op before that.
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, view) = engine_and_view();
+        let completed = || Effect::TaskCompleted {
+            id: "t1".to_string(),
+        };
+
+        assert!(
+            matches!(engine.run_effect(completed()), Disposition::Ignored(_)),
+            "a completion before the panel ever opened does no work"
+        );
+
+        view.tasks_loaded.set(true);
+        assert_eq!(
+            engine.run_effect(completed()),
+            Disposition::Handled,
+            "once the panel has loaded, a completion refreshes it"
         );
     }
 }

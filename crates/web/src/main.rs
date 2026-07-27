@@ -44,6 +44,11 @@ mod context;
 // hosts the default-on "Share device info" settings toggle.
 #[cfg(any(target_arch = "wasm32", test))]
 mod device_info;
+// The reducer-effect coverage contract (issue #73): the `Disposition` the
+// engine's executor returns for every effect, plus the host-only census that
+// proves the coverage test sees every `Effect` variant.
+#[cfg(any(target_arch = "wasm32", test))]
+mod effects;
 // Conversation rename + archive/unarchive for the switcher (issue #49): the pure
 // decision logic (host-tested here) plus its `#[cfg(target_arch = "wasm32")]`
 // row-action / archived-section views over `sidebar`.
@@ -93,6 +98,11 @@ mod reply;
 mod scratchpad;
 #[cfg(any(target_arch = "wasm32", test))]
 mod sidebar;
+// The chat status line (issue #73): the pure classification of the engine's
+// status string (error vs progress, hidden when empty) is host-tested here; a
+// `#[cfg(target_arch = "wasm32")]` view paints it above the composer.
+#[cfg(any(target_arch = "wasm32", test))]
+mod status;
 // Background-tasks panel (issue #50): pure formatting/list helpers host-tested
 // here, plus a `#[cfg(target_arch = "wasm32")]` Leptos panel that renders the
 // engine's live `tasks` signal.

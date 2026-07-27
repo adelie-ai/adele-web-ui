@@ -409,6 +409,12 @@ fn ChatScreen(session: RwSignal<Option<String>>) -> impl IntoView {
             // composer; hidden until the active conversation reports a reading.
             {context::context_usage_bar(view)}
 
+            // Status line (issue #73): provider errors, a dropped connection, a
+            // send that never left, and the per-turn progress line. Hidden when
+            // there is nothing to say. Without it a failed turn ends in silence
+            // — the streaming bubble just disappears.
+            {crate::status::status_view(view)}
+
             // Queued-messages strip (feat/queue-messages): messages submitted
             // while Adele is busy queue here as chips (edit / remove) until the
             // reply finishes and the batch flushes as one turn. Hidden when empty.
