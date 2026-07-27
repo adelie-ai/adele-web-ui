@@ -13,6 +13,12 @@
 //! Kept transport- and view-free so it unit-tests on the host target like
 //! [`crate::context`] / [`crate::model`].
 
+/// The prefixes the shared reducer stamps on a status the user must not miss:
+/// `UiMessage::Error` and a failed stream become `"Error: {text}"`, a dropped
+/// connection becomes `"Disconnected: {reason}"`. Everything else — the
+/// connection label and the per-turn progress line — is ordinary chatter.
+const FAILURE_PREFIXES: [&str; 2] = ["Error:", "Disconnected:"];
+
 /// How loudly a status string is presented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
@@ -28,17 +34,26 @@ pub enum StatusKind {
 impl StatusKind {
     /// CSS modifier appended to the `status-line` class.
     pub fn css_class(self) -> &'static str {
-        todo!("issue #73: CSS modifier for {self:?}")
+        match self {
+            StatusKind::Progress => "status-progress",
+            StatusKind::Failure => "status-failure",
+        }
     }
 
     /// ARIA role for the rendered line.
     pub fn aria_role(self) -> &'static str {
-        todo!("issue #73: ARIA role for {self:?}")
+        match self {
+            StatusKind::Progress => "status",
+            StatusKind::Failure => "alert",
+        }
     }
 
     /// ARIA live-region politeness for the rendered line.
     pub fn aria_live(self) -> &'static str {
-        todo!("issue #73: ARIA politeness for {self:?}")
+        match self {
+            StatusKind::Progress => "polite",
+            StatusKind::Failure => "assertive",
+        }
     }
 }
 
@@ -53,8 +68,67 @@ pub struct StatusLine {
 
 /// Turn the engine's raw status string into a line to render, or `None` when
 /// there is nothing to say (the line collapses to zero height).
+///
+/// Classification keys off the reducer's own [`FAILURE_PREFIXES`] rather than
+/// searching for the word "error" anywhere in the string, so a progress line
+/// that merely names a file stays calm.
 pub fn status_line(text: &str) -> Option<StatusLine> {
-    todo!("issue #73: classify and surface {text:?}")
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let kind = if FAILURE_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+    {
+        StatusKind::Failure
+    } else {
+        StatusKind::Progress
+    };
+    Some(StatusLine {
+        text: text.to_string(),
+        kind,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use view::status_view;
+
+#[cfg(target_arch = "wasm32")]
+mod view {
+    use leptos::prelude::*;
+
+    use super::status_line;
+    use crate::engine::ViewSignals;
+
+    /// The status line, painted just above the composer — the last thing the
+    /// user sees before their draft, so a turn that failed says why instead of
+    /// ending in a bubble that silently disappears.
+    ///
+    /// Hidden (zero footprint) whenever there is nothing to say, so it never
+    /// crowds a phone viewport. A failure is an assertive `alert`; progress is
+    /// a polite `status`, so a screen reader is not interrupted every time a
+    /// tool loop reports where it has got to.
+    ///
+    /// The text is rendered as a DOM **text node**, never `inner_html`: it can
+    /// carry provider- or model-influenced content, and Leptos escapes it. This
+    /// is deliberately unlike the chat bubbles, which go through
+    /// [`crate::markdown`]'s sanitizer because they must render markup.
+    pub fn status_view(view: ViewSignals) -> impl IntoView {
+        move || {
+            status_line(&view.status.get()).map(|line| {
+                view! {
+                    <p
+                        class=format!("status-line {}", line.kind.css_class())
+                        role=line.kind.aria_role()
+                        aria-live=line.kind.aria_live()
+                    >
+                        {line.text}
+                    </p>
+                }
+            })
+        }
+    }
 }
 
 #[cfg(test)]

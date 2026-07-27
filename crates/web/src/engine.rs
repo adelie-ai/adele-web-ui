@@ -8,6 +8,11 @@
 //! after every dispatch (the tui's model), so the message list, streaming text,
 //! and title need no per-effect wiring — only the handful of accessor-less
 //! transient effects (status, send-sensitivity) are reflected directly.
+//!
+//! [`Engine::run_effect`] matches `Effect` exhaustively and reports a
+//! [`Disposition`] for each one, so an effect this client does not act on says
+//! why rather than vanishing, and a new variant upstream is a build error (see
+//! [`crate::effects`]).
 
 // The engine's full surface is exercised by the wasm UI (`app.rs`). On the host
 // build `app.rs` is absent, so this module is compiled only to unit-test its
@@ -690,8 +695,18 @@ impl Engine {
             .set(self.state.editing_queued_index());
     }
 
+    /// Perform one reducer [`Effect`], reporting what became of it.
+    ///
+    /// Matched **exhaustively on purpose**: a client mirrors the shared
+    /// reducer's effects into its own view by hand, so an effect that falls
+    /// through a `_` arm is a silent no-op — exactly how every error and status
+    /// string went missing here (issue #73). Without a catch-all, a new variant
+    /// in `client-ui-common` is a build error, and every variant this client
+    /// does drop says why. `crate::effects::census` keeps the coverage test's
+    /// sample list in step.
     fn run_effect(&mut self, effect: Effect) -> Disposition {
-        let disposition = Disposition::Ignored("");
+        // Performed below; anything the web client deliberately drops falls to
+        // the `Ignored` arms at the bottom, each carrying its reason.
         match effect {
             Effect::EnsureActiveConversation => self.ensure_active_conversation(),
             Effect::LoadConversation(id) => self.spawn_get_conversation(id, false),
@@ -704,7 +719,16 @@ impl Engine {
                 idempotency_key,
             } => self.spawn_send(conversation_id, prompt, system_refinement, idempotency_key),
             Effect::SubscribeConversations(ids) => self.spawn_subscribe(ids),
-            // Accessor-less transient effects: reflect directly.
+            // Accessor-less transient effects: reflect directly. The status
+            // signal is what `crate::status` paints above the composer — the
+            // client's only channel for a provider error, a dropped connection,
+            // a send that never left, or a long tool loop's progress. GTK and
+            // the TUI give the transient chat status its own widget; a phone
+            // viewport gets ONE line, which is safe because the reducer clears
+            // the chat status at each turn boundary and always writes an error
+            // *after* that clear — a failure is never wiped by the turn that
+            // produced it, and a stale one goes when the next reply's first
+            // chunk arrives.
             Effect::SetStatusText(text) | Effect::SetChatStatus(text) => self.view.status.set(text),
             Effect::ClearChatStatus => self.view.status.set(String::new()),
             Effect::SetSendSensitive(enabled) => self.view.send_enabled.set(enabled),
@@ -759,19 +783,64 @@ impl Engine {
             // terminal `Completed`/`Failed`/`Cancelled` status. Re-fetch the
             // authoritative snapshot so the finished task shows its real status
             // and stays visible as "recent", but only once the panel has been
-            // opened (the guard: a never-opened panel does no work — an
-            // un-guarded completion falls through to the `_` arm below).
-            // `RefreshSidePaneTasks` is a GTK conversation-side-pane concern with
-            // no web analogue and is likewise ignored there.
-            Effect::TaskCompleted { .. } if self.view.tasks_loaded.get_untracked() => {
+            // opened: a never-opened panel has nothing to refresh.
+            Effect::TaskCompleted { .. } => {
+                if !self.view.tasks_loaded.get_untracked() {
+                    return Disposition::Ignored(
+                        "the tasks panel has never been opened, so there is no list to refresh",
+                    );
+                }
                 self.refresh_tasks()
             }
-            // The message list, streaming buffer, per-task logs, voice, and
-            // client-tool effects are either re-derived in `sync_view` or out of
-            // scope. Deliberately ignored.
-            _ => {}
+
+            // --- Deliberately not acted on -----------------------------------
+            //
+            // Each arm states why dropping it loses nothing. Adding a variant to
+            // `client_ui_common::Effect` without deciding which side of this line
+            // it falls on is a build error, not a new silent no-op.
+            Effect::LoadConversationIntoChat(_)
+            | Effect::ClearChat
+            | Effect::AddUserMessage(_)
+            | Effect::ReceiveChunk(_)
+            | Effect::CompleteStreaming(_)
+            | Effect::SetQueuedMessages { .. } => {
+                return Disposition::Ignored(
+                    "the transcript, streaming buffer and queued list are re-derived from \
+                     WindowState in sync_view after every dispatch",
+                );
+            }
+            Effect::ClearClient => {
+                return Disposition::Ignored(
+                    "app.rs's session loop owns the transport handle and clears it itself \
+                     when the socket drops",
+                );
+            }
+            Effect::RefreshSidePaneTasks => {
+                return Disposition::Ignored(
+                    "a GTK conversation-side-pane concern; the web tasks panel renders the \
+                     flat list the Task* effects above maintain",
+                );
+            }
+            Effect::TaskLogAppended { .. } => {
+                return Disposition::Ignored(
+                    "the BFF never relays per-task logs to the browser (server relay.rs) and \
+                     the panel shows status/progress, not logs",
+                );
+            }
+            Effect::Speak(_)
+            | Effect::AddLocalMessage { .. }
+            | Effect::SetAdeleOutputDropdown(_)
+            | Effect::SubmitClientToolResult { .. } => {
+                return Disposition::Ignored(
+                    "the daemon's voice channel: the SPA never dispatches SetAdeleOutput and \
+                     the BFF never relays ClientToolCall to the browser (server relay.rs — \
+                     the SPA is not an MCP host), so every conversation's level stays \
+                     Disabled and the reducer emits none of these here; browser read-aloud \
+                     speaks from last_completed_reply instead (crate::read_aloud)",
+                );
+            }
         }
-        disposition
+        Disposition::Handled
     }
 
     // --- Model selection (issue #9) ------------------------------------------

@@ -315,6 +315,35 @@ button {
   }
 }
 
+/* --- Status line (issue #73) ----------------------------------------------- */
+/* A slim strip above the composer carrying whatever the shared reducer wants the
+   user to know: the connection label, a turn's progress line, and — the reason
+   it exists — provider errors, dropped connections and sends that never left. A
+   failure is coloured and stays put until the next turn replaces it; progress is
+   muted. Hidden entirely when there is nothing to say. Wraps rather than
+   truncating: a shortened provider error hides the diagnosis — but the strip is
+   capped and scrolls, so an enormous error body can never push the composer off
+   a phone screen. */
+.status-line {
+  margin: 0;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.status-line.status-progress {
+  color: var(--muted);
+}
+
+.status-line.status-failure {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg));
+}
+
 /* --- Queued-messages strip (feat/queue-messages) --------------------------- */
 /* A slim strip above the composer listing messages queued while Adele is busy;
    each chip recalls its message (tap the body) or drops it (×). Modeled on the
