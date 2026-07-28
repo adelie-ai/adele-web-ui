@@ -131,7 +131,9 @@ pub fn event_to_ui_message(event: Event) -> Option<UiMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use desktop_assistant_api_model::{Command, WsFrame, WsRequest};
+    use desktop_assistant_api_model::{
+        Command, ToolTier, TurnCapabilityReason, WsFrame, WsRequest,
+    };
 
     #[test]
     fn send_message_request_serializes_snake_case_and_skips_empty_optionals() {
@@ -232,11 +234,48 @@ mod tests {
             conversation_id: "c1".to_string(),
             request_id: "r1".to_string(),
             message: "searching".to_string(),
+            capability_change: None,
         };
         assert!(matches!(
             event_to_ui_message(ev),
             Some(UiMessage::AssistantStatus { request_id, message })
                 if request_id == "r1" && message == "searching"
+        ));
+    }
+
+    /// The daemon may attach a structured capability change to a status event.
+    /// The shared reducer has no counterpart field yet, so the mapping keeps the
+    /// status text and drops the extra data instead of failing.
+    ///
+    /// The reason and the tiers are read back as typed values before the
+    /// mapping runs. Both types fall back to a catch-all variant for a string
+    /// they do not know, so only an equality check on the decoded value proves
+    /// the fixture carries the wire strings the daemon actually sends.
+    #[test]
+    fn assistant_status_with_a_capability_change_still_maps_to_status() {
+        let frame: WsFrame = serde_json::from_str(
+            r#"{"event":{"event":{"assistant_status":{"conversation_id":"c1","request_id":"r1","message":"tools that act are now refused","capability_change":{"reason":"external_content_ingested","closed_tool_tiers":["mutate","network_egress","code_execution"]}}}}}"#,
+        )
+        .expect("a status frame with a capability change parses");
+        let WsFrame::Event { event } = frame else {
+            panic!("expected an event frame");
+        };
+        let Event::AssistantStatus {
+            capability_change: Some(change),
+            ..
+        } = &event
+        else {
+            panic!("expected a status event carrying a capability change, got {event:?}");
+        };
+        assert_eq!(change.reason, TurnCapabilityReason::ExternalContentIngested);
+        assert_eq!(
+            change.closed_tool_tiers,
+            [ToolTier::Mutate, ToolTier::Egress, ToolTier::Execution]
+        );
+        assert!(matches!(
+            event_to_ui_message(event),
+            Some(UiMessage::AssistantStatus { request_id, message })
+                if request_id == "r1" && message == "tools that act are now refused"
         ));
     }
 
@@ -359,6 +398,7 @@ mod tests {
                 conversation_id: "c1".to_string(),
                 request_id: "r1".to_string(),
                 message: "searching".to_string(),
+                capability_change: None,
             },
             Event::ContextUsage {
                 conversation_id: "c1".to_string(),

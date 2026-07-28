@@ -210,6 +210,9 @@ fn project_turn_event(
                 conversation_id: conversation_id.clone(),
                 request_id: rid(),
                 message: message.clone(),
+                // The daemon signal this projects from carries the status text
+                // only, so there is no structured capability change to pass on.
+                capability_change: None,
             },
             false,
         )),
