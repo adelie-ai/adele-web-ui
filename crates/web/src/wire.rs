@@ -518,13 +518,30 @@ mod tests {
         );
     }
 
+    /// The daemon may add optional fields to the error frame; an older payload
+    /// without them must still parse, and a newer one must not break the read.
+    #[test]
+    fn error_frame_with_a_classification_still_correlates_by_id() {
+        let frame: WsFrame = serde_json::from_str(
+            r#"{"error":{"id":"req-9","error":"not authorized: 'set_api_key' requires the administrator capability","detail":{"code":"not_authorized","description":"d","message":"Only a daemon administrator can do that.","retryable":false}}}"#,
+        )
+        .expect("a classified error frame parses");
+        match frame {
+            WsFrame::Error { id, error, .. } => {
+                assert_eq!(id, "req-9");
+                assert!(error.starts_with("not authorized:"), "{error}");
+            }
+            other => panic!("expected an error frame, got {other:?}"),
+        }
+    }
+
     #[test]
     fn error_frame_correlates_by_id() {
         let frame: WsFrame =
             serde_json::from_str(r#"{"error":{"id":"req-9","error":"conversation not found"}}"#)
                 .expect("error frame parses");
         match frame {
-            WsFrame::Error { id, error } => {
+            WsFrame::Error { id, error, .. } => {
                 assert_eq!(id, "req-9");
                 assert_eq!(error, "conversation not found");
             }

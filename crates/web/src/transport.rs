@@ -249,7 +249,11 @@ async fn read_pump(
                     let _ = tx.send(Ok(result));
                 }
             }
-            Ok(WsFrame::Error { id, error }) => {
+            // `..` so the daemon can add fields to the error frame without
+            // breaking this reader. It currently also carries an optional
+            // `detail` classifying the failure, which this transport does not
+            // surface yet (see the authorization-tier issue).
+            Ok(WsFrame::Error { id, error, .. }) => {
                 if let Some(tx) = pending.borrow_mut().remove(&id) {
                     let _ = tx.send(Err(error));
                 }
