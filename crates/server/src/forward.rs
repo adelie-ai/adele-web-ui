@@ -660,6 +660,7 @@ mod tests {
     // tests use) whose send handler records the key it receives and then emits a
     // terminal event so the BFF's event-forwarding loop unblocks and returns.
 
+    use desktop_assistant_auth_jwt::UserId;
     use desktop_assistant_client_common::{ConnectionConfig, Connector, TransportMode};
     use desktop_assistant_uds::{UdsAuthValidator, UdsServer, UdsServerConfig};
     use std::sync::Mutex;
@@ -717,6 +718,13 @@ mod tests {
     impl UdsAuthValidator for AllowAllAuth {
         async fn validate_bearer_token(&self, _token: &str) -> bool {
             true
+        }
+
+        /// Identity is part of acceptance: a validator that accepts a token
+        /// must name the subject it belongs to, or the daemon refuses the
+        /// connection rather than filing it under the shared default identity.
+        async fn extract_user_id(&self, _token: &str) -> Option<UserId> {
+            Some(UserId::from("test-user"))
         }
     }
 
