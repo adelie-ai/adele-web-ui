@@ -142,6 +142,9 @@ pub fn relay_signal_to_event(signal: &SignalEvent) -> Option<api::Event> {
             conversation_id: conversation_id.clone(),
             request_id: request_id.clone(),
             message: message.clone(),
+            // The daemon signal this relays carries the status text only, so
+            // there is no structured capability change to pass on.
+            capability_change: None,
         }),
         SignalEvent::ContextUsage {
             conversation_id,

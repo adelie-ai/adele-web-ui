@@ -232,11 +232,31 @@ mod tests {
             conversation_id: "c1".to_string(),
             request_id: "r1".to_string(),
             message: "searching".to_string(),
+            capability_change: None,
         };
         assert!(matches!(
             event_to_ui_message(ev),
             Some(UiMessage::AssistantStatus { request_id, message })
                 if request_id == "r1" && message == "searching"
+        ));
+    }
+
+    /// The daemon may attach a structured capability change to a status event.
+    /// The shared reducer has no counterpart field yet, so the mapping keeps the
+    /// status text and drops the extra data instead of failing.
+    #[test]
+    fn assistant_status_with_a_capability_change_still_maps_to_status() {
+        let frame: WsFrame = serde_json::from_str(
+            r#"{"event":{"event":{"assistant_status":{"conversation_id":"c1","request_id":"r1","message":"tools that act are now refused","capability_change":{"reason":"external_content_ingested","closed_tool_tiers":["mutate","network_egress","code_execution"]}}}}}"#,
+        )
+        .expect("a status frame with a capability change parses");
+        let WsFrame::Event { event } = frame else {
+            panic!("expected an event frame");
+        };
+        assert!(matches!(
+            event_to_ui_message(event),
+            Some(UiMessage::AssistantStatus { request_id, message })
+                if request_id == "r1" && message == "tools that act are now refused"
         ));
     }
 
@@ -359,6 +379,7 @@ mod tests {
                 conversation_id: "c1".to_string(),
                 request_id: "r1".to_string(),
                 message: "searching".to_string(),
+                capability_change: None,
             },
             Event::ContextUsage {
                 conversation_id: "c1".to_string(),
