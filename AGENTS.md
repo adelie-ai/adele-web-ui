@@ -78,18 +78,15 @@ IPC, D-Bus, and MCP tool arguments. Validate the JWT on the `/ws` upgrade, enfor
 `Origin` allowlist, and never trust a client-supplied identity. The single-page app renders
 assistant-produced markdown, so sanitize and escape it on the render path.
 
-### 6.1 Dependencies - a high or critical advisory is a hard blocker (override, stricter than the base)
+### 6.1 Dependencies - the group's scan workflow (addition)
 
-Scan after you add a dependency and before the first build:
+Base rule 6.1 sets the policy, including that a high or critical advisory blocks the change.
+This group runs it with its own tooling:
 
 1. Add the dependency (`cargo add <crate>`). This writes the lockfile but does not build.
 2. Scan the updated lockfile with the `cve-mcp` server's `scan_packages` tool, or with
    `cargo audit`. Pass every (name, version, ecosystem) tuple.
-3. A high or critical finding blocks the change. Patch it in the same change, or prove the
-   path unreachable and write down why, or file an issue and reference it from the change.
-4. Build only after the scan is clean, or after you have accepted the findings in writing.
-
-Never pin around an advisory without a comment or a tracked issue.
+3. Build only after the scan is clean, or after you have accepted the findings in writing.
 
 ### 9.1 Tracker for this project
 
