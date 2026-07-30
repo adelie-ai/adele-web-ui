@@ -181,6 +181,7 @@ pub mod census {
             messages: Vec::new(),
             model_selection: None,
             conversation_personality: None,
+            tool_gate_disabled: false,
         }
     }
 
