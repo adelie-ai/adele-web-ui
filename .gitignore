@@ -5,3 +5,6 @@
 **/*.rs.bk
 *.swp
 .DS_Store
+
+# Gate and build output, never committed.
+*.log
