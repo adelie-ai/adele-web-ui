@@ -34,7 +34,7 @@ A **mobile-first web client** for the Adele assistant, at feature parity with th
 
 - `cargo build`, `cargo test` — the native BFF server.
 - `just build-web` — the wasm SPA (needs `cargo install trunk` + the `wasm32-unknown-unknown` target).
-- `just check` — the full local gate (fmt, clippy, build, test). `just install-hooks` wires it into a pre-push hook (run once per clone).
+- `just check` — the local gate for the default feature set (fmt, clippy, build, test). `just check-otel` runs the same lint/build/test steps with `--features otel`; `just check-all` runs both. `just install-hooks` wires `check-all` into a pre-push hook (run once per clone).
 
 ## Dependency safety
 
@@ -48,10 +48,12 @@ rule the base does not have.
 
 ### 3.1 The gate for this repo (addition)
 
-The `adelie-ai` repos have no CI. The gate is local and the author runs it: `just check`.
-Run `just install-hooks` once per clone to put the same gate on pre-push. Warnings are
-denied mechanically by the workspace `[lints]` table, which every member crate inherits
-with `[lints] workspace = true`, so `cargo build`, `cargo test`, and `cargo clippy` each
+The `adelie-ai` repos have no CI. The gate is local and the author runs it: `just check`
+for the default feature set, `just check-all` for every configuration this crate ships in
+(default features and `--features otel`). Run `just install-hooks` once per clone to put
+`check-all` on pre-push. Warnings are denied mechanically by the workspace `[lints]`
+table, which every member crate inherits with `[lints] workspace = true`, so
+`cargo build`, `cargo test`, and `cargo clippy` each
 hard-fail on a warning.
 
 ### 4.3 Branch and pull request - merge when green (override, weaker than the base)

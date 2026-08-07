@@ -8,12 +8,17 @@
 //! the browser's so the SPA correlates against the id it sent.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use adelie_telemetry::metrics::{self, Label};
 use desktop_assistant_api_model as api;
 use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_application::{ApiError, ApiResult, AssistantApiHandler, EventSink};
 use desktop_assistant_client_common::{AssistantCommands, Connector, SignalEvent};
 use desktop_assistant_core::ports::transport::current_client_context;
+use tracing::Instrument;
+
+use crate::command_kind::command_kind;
 
 pub struct ForwardingHandler {
     connector: Arc<Connector>,
@@ -51,12 +56,26 @@ impl AssistantApiHandler for ForwardingHandler {
         // fetches — passes through untouched. Compute the gate before `cmd` moves
         // into `send_command`.
         let is_get_conversation = matches!(cmd, api::Command::GetConversation { .. });
-        let result = self
-            .commands()?
-            .send_command(cmd)
-            .await
-            .map_err(|e| ApiError::Core(e.to_string()))?;
-        Ok(browser_conversation_result(is_get_conversation, result))
+
+        // One span per forwarded daemon call (adele-web-ui#91): `kind` is the bare
+        // variant name only, never a field value, so this stays INFO-safe under D10
+        // regardless of which command it wraps.
+        let kind = command_kind(&cmd);
+        let span = tracing::info_span!("daemon.call", command = %kind);
+        let start = Instant::now();
+
+        let sent = async {
+            self.commands()?
+                .send_command(cmd)
+                .await
+                .map_err(|e| ApiError::Core(e.to_string()))
+        }
+        .instrument(span)
+        .await;
+
+        record_daemon_call(kind, start.elapsed(), sent.is_err());
+
+        Ok(browser_conversation_result(is_get_conversation, sent?))
     }
 
     async fn handle_send_message(
@@ -80,6 +99,63 @@ impl AssistantApiHandler for ForwardingHandler {
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_send_message_with_override(
+        &self,
+        conversation_id: String,
+        content: String,
+        override_selection: Option<api::SendPromptOverride>,
+        system_refinement: String,
+        request_id: String,
+        idempotency_key: Option<String>,
+        sink: Arc<dyn EventSink>,
+    ) -> ApiResult<()> {
+        // One span for the whole forwarded turn (adele-web-ui#91): from the SendMessage
+        // that starts it to the terminal event that ends it. `command` never carries the
+        // prompt - only the fixed variant name - so this stays INFO-safe under D10.
+        // `conversation_id` is an id, which D10 permits at INFO; it is what lets a query
+        // return every turn in a conversation without any of them sharing a trace (D13).
+        let span = tracing::info_span!(
+            "daemon.call",
+            command = %"SendMessage",
+            conversation_id = %conversation_id,
+        );
+        let start = Instant::now();
+
+        let result = self
+            .send_message_forward(
+                conversation_id,
+                content,
+                override_selection,
+                system_refinement,
+                request_id,
+                idempotency_key,
+                sink,
+            )
+            .instrument(span)
+            .await;
+
+        record_daemon_call("SendMessage", start.elapsed(), result.is_err());
+        result
+    }
+
+    /// Hand the dispatcher the shared browser-session registry (#33). This is the
+    /// `ws-interface`'s sanctioned seam for server-initiated pushes: the
+    /// dispatcher registers each browser connection's outbound sink here at
+    /// connect and applies its `SubscribeConversations`. The background relay
+    /// ([`crate::relay::run_relay`]) then fans the daemon's cross-client /
+    /// background events to those sessions through this same registry. Returning
+    /// `None` (the old default) is what left live sync / scratchpad undelivered.
+    fn conversation_subscriptions(&self) -> Option<Arc<ConversationSubscriptions>> {
+        Some(Arc::clone(&self.subs))
+    }
+}
+
+impl ForwardingHandler {
+    /// The forwarded-turn body `handle_send_message_with_override` wraps in a
+    /// `daemon.call` span. Kept as its own method (rather than inline in the trait
+    /// method) so the span and timing wrapper stay a plain, uninstrumented view of what
+    /// actually happens.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_forward(
         &self,
         conversation_id: String,
         content: String,
@@ -147,17 +223,6 @@ impl AssistantApiHandler for ForwardingHandler {
             }
         }
         Ok(())
-    }
-
-    /// Hand the dispatcher the shared browser-session registry (#33). This is the
-    /// `ws-interface`'s sanctioned seam for server-initiated pushes: the
-    /// dispatcher registers each browser connection's outbound sink here at
-    /// connect and applies its `SubscribeConversations`. The background relay
-    /// ([`crate::relay::run_relay`]) then fans the daemon's cross-client /
-    /// background events to those sessions through this same registry. Returning
-    /// `None` (the old default) is what left live sync / scratchpad undelivered.
-    fn conversation_subscriptions(&self) -> Option<Arc<ConversationSubscriptions>> {
-        Some(Arc::clone(&self.subs))
     }
 }
 
@@ -333,12 +398,25 @@ fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::
     current.as_ref().and_then(browser_scoped_client_context)
 }
 
+/// Record the `daemon_call.duration` histogram and, on failure, the
+/// `daemon_call.failures` counter for one forwarded daemon call.
+fn record_daemon_call(command: &str, elapsed: Duration, failed: bool) {
+    let labels = [Label::new("command", command.to_string())];
+    metrics::record_duration("daemon_call.duration", elapsed, &labels);
+    if failed {
+        metrics::increment("daemon_call.failures", &labels);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DAEMON_RID: &str = "daemon-req-1";
     const BROWSER_RID: &str = "browser-req-1";
+    /// A distinctive reply body the D10 content test looks for. It must never appear in
+    /// any captured span or event field.
+    const REPLY_MARKER: &str = "REPLY_MARKER_TOKEN_never_at_info";
 
     fn mv(role: &str, content: &str) -> api::MessageView {
         api::MessageView {
@@ -706,7 +784,7 @@ mod tests {
             sink.emit(api::Event::AssistantCompleted {
                 conversation_id,
                 request_id,
-                full_response: String::new(),
+                full_response: REPLY_MARKER.to_string(),
             })
             .await;
             Ok(())
@@ -813,6 +891,185 @@ mod tests {
             seen,
             Some(Some(KEY.to_string())),
             "the browser SendMessage.idempotency_key must reach the daemon-side command"
+        );
+    }
+
+    // --- adele-web-ui#91: a span per forwarded daemon call, content-free (D10) --------
+    // `command_kind` itself is tested in its own module (`crate::command_kind`).
+
+    /// Acceptance (epic D10): the prompt a browser sends and the reply the daemon
+    /// returns never reach an INFO-level span field. Drives `handle_send_message_with_
+    /// override` over a real UDS daemon double (the same pattern as the idempotency-key
+    /// test above), with a tracing capture layer installed so the test reads back what
+    /// the `daemon.call` span actually recorded instead of trusting the code that wrote
+    /// it.
+    #[tokio::test]
+    async fn no_request_or_reply_body_at_info() {
+        use crate::test_support::Recorder;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        const PROMPT_MARKER: &str = "PROMPT_MARKER_TOKEN_never_at_info";
+
+        let recorder = Recorder::new();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let _tracing_guard = tracing::subscriber::set_default(subscriber);
+
+        let dir =
+            std::env::temp_dir().join(format!("adele-web-ui-content-{}", uuid::Uuid::new_v4()));
+        let socket_path = dir.join("d.sock");
+
+        let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
+            captured: Arc::new(Mutex::new(None)),
+        });
+        let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
+        let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = server
+                .serve_with_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        wait_for_socket(&socket_path).await;
+
+        let config = ConnectionConfig {
+            transport_mode: TransportMode::Uds,
+            socket_path: Some(socket_path.clone()),
+            ws_jwt: Some("test-token".to_string()),
+            share_client_context: false,
+            ..ConnectionConfig::default()
+        };
+        let connector = Arc::new(Connector::connect(&config).await.expect("connect over uds"));
+        let subs = Arc::new(ConversationSubscriptions::new());
+        let forwarding = ForwardingHandler::new(connector, subs);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                PROMPT_MARKER.to_string(),
+                None,
+                String::new(),
+                "browser-req-1".to_string(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let daemon_call_spans: Vec<_> = recorder
+            .spans()
+            .into_iter()
+            .filter(|span| span.name == "daemon.call")
+            .collect();
+        assert!(
+            !daemon_call_spans.is_empty(),
+            "a daemon.call span must wrap the forwarded SendMessage"
+        );
+
+        for span in &daemon_call_spans {
+            assert_eq!(
+                span.fields.get("command").map(String::as_str),
+                Some("SendMessage"),
+                "the daemon.call span must name the command it wraps"
+            );
+            for (key, value) in &span.fields {
+                assert!(
+                    !value.contains(PROMPT_MARKER),
+                    "daemon.call span field {key:?} carried the prompt: {value:?}"
+                );
+                assert!(
+                    !value.contains(REPLY_MARKER),
+                    "daemon.call span field {key:?} carried the reply: {value:?}"
+                );
+            }
+        }
+    }
+
+    /// Acceptance (review finding #3, epic D13): "Carry conversation_id as an
+    /// attribute. A conversation is not a trace; it is an attribute that lets one
+    /// query return every turn in it." `conversation_id` is an id, which D10 permits
+    /// at INFO, so it must reach the `daemon.call` span the forwarded SendMessage turn
+    /// wraps.
+    #[tokio::test]
+    async fn daemon_call_span_carries_conversation_id() {
+        use crate::test_support::Recorder;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        const CONVERSATION_ID: &str = "conversation-under-test";
+
+        let recorder = Recorder::new();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let _tracing_guard = tracing::subscriber::set_default(subscriber);
+
+        let dir =
+            std::env::temp_dir().join(format!("adele-web-ui-convid-{}", uuid::Uuid::new_v4()));
+        let socket_path = dir.join("d.sock");
+
+        let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
+            captured: Arc::new(Mutex::new(None)),
+        });
+        let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
+        let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = server
+                .serve_with_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        wait_for_socket(&socket_path).await;
+
+        let config = ConnectionConfig {
+            transport_mode: TransportMode::Uds,
+            socket_path: Some(socket_path.clone()),
+            ws_jwt: Some("test-token".to_string()),
+            share_client_context: false,
+            ..ConnectionConfig::default()
+        };
+        let connector = Arc::new(Connector::connect(&config).await.expect("connect over uds"));
+        let subs = Arc::new(ConversationSubscriptions::new());
+        let forwarding = ForwardingHandler::new(connector, subs);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                CONVERSATION_ID.to_string(),
+                "hi".to_string(),
+                None,
+                String::new(),
+                "browser-req-1".to_string(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let daemon_call = recorder
+            .spans()
+            .into_iter()
+            .find(|span| span.name == "daemon.call")
+            .expect("a daemon.call span must wrap the forwarded SendMessage");
+        assert_eq!(
+            daemon_call
+                .fields
+                .get("conversation_id")
+                .map(String::as_str),
+            Some(CONVERSATION_ID),
+            "the daemon.call span must carry conversation_id (D13), so one query \
+             returns every turn in a conversation"
         );
     }
 }

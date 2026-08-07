@@ -16,7 +16,6 @@ axum.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 serde.workspace = true
 toml.workspace = true
 uuid.workspace = true
@@ -28,6 +27,10 @@ desktop-assistant-api-model.workspace = true
 desktop-assistant-auth-jwt.workspace = true
 desktop-assistant-core.workspace = true
 
+# Shared telemetry: subscriber construction, the three OTLP pipelines, the metrics
+# facade and the shutdown guard. Pinned by revision (mcp-core#38 epic decision D7).
+adelie-telemetry = { git = "https://github.com/adelie-ai/adelie-telemetry", rev = "1b8166ab483174e76aa23079858b8a31aaa52ae1" }
+
 [dev-dependencies]
 # Only for tests: constructing a `SignalEvent::ClientToolCall`'s `serde_json::Value`
 # arguments to assert it is NOT relayed. The BFF proper carries no JSON of its own.
@@ -36,6 +39,20 @@ serde_json.workspace = true
 # real `Connector` to, so `SendMessage.idempotency_key` (#570) is asserted at the
 # daemon side over the actual transport rather than a hand-rolled stand-in.
 desktop-assistant-uds.workspace = true
+# Only for tests: drives an axum `Router` with a request, per axum's own testing
+# guidance, to assert what the request-span middleware actually recorded.
+tower = { version = "0.5", features = ["util"] }
+# Only for tests: `test_support::Recorder` is a `tracing_subscriber::Layer` that reads
+# back what a span actually recorded. `adelie_telemetry::init` builds the shipping
+# subscriber itself; production code never touches this crate directly.
+tracing-subscriber.workspace = true
+
+[features]
+# OTLP export passthrough, off by default. With this off the BFF pulls in no
+# opentelemetry crate at all (see `adelie-telemetry`'s README, "OpenTelemetry
+# export"). `cargo build --features otel` turns all three signals' exporters on,
+# configured entirely from the standard `OTEL_*` environment variables.
+otel = ["adelie-telemetry/otel"]
 
 [lints]
 workspace = true

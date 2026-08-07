@@ -9,11 +9,15 @@
 //! served once the Leptos app lands (Step 2).
 
 mod auth;
+mod command_kind;
 mod config;
 mod daemon_conn;
 mod forward;
 mod relay;
 mod subs_forward;
+mod telemetry;
+#[cfg(test)]
+mod test_support;
 mod ws_auth;
 
 use std::sync::Arc;
@@ -34,11 +38,15 @@ use crate::forward::ForwardingHandler;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // Traces, metrics and logs, through the shared adelie-telemetry crate (see the
+    // README's Logging section). Bound here, first, and held for the life of `main` so
+    // all three signals flush on exit (D6) - every early return below drops it too.
+    // Console output moves to stderr unconditionally (D1); `info` is this binary's old
+    // default filter, kept explicit so a future crate-side default change can't silently
+    // change what a quiet install logs.
+    let _telemetry_guard = adelie_telemetry::init(
+        adelie_telemetry::Config::new("adele-web-ui").with_default_filter("info"),
+    )?;
 
     let mut config = BffConfig::load(&BffConfig::default_path())?;
     // Env (`ADELE_WEB_UI_*`) overlays the TOML so a container / systemd unit can
@@ -225,6 +233,11 @@ async fn main() -> anyhow::Result<()> {
     let app = app.layer(axum::middleware::from_fn(
         ws_auth::inject_bearer_from_subprotocol,
     ));
+
+    // Outermost layer (adele-web-ui#91): one `http.request` span per inbound request,
+    // wrapping every other layer above (auth, the static-asset fallback) so `status`
+    // reflects what the browser actually received.
+    let app = app.layer(axum::middleware::from_fn(telemetry::request_span));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "adele-web-ui listening (BFF: /ws, /login, /auth/config, /healthz)");

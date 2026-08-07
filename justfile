@@ -4,11 +4,21 @@ default:
     @just --list
 
 # --- Local verification ("local CI") -----------------------------------------
-# We run these locally instead of GitHub Actions. `install-hooks` wires `check`
+# We run these locally instead of GitHub Actions. `install-hooks` wires `check-all`
 # into a git pre-push hook so it runs automatically before every push.
 
-# Full local gate: formatting, lints, build, tests (on the pinned toolchain)
+# The gate for the default feature set.
 check: fmt-check lint build test
+
+# The gate for the `otel` feature: adelie-telemetry's OTLP export passthrough
+# (Cargo.toml). The BFF ships in two configurations, so both must pass before a push.
+check-otel:
+    cargo clippy --all-targets --features otel -- -D warnings
+    cargo build --features otel
+    cargo test --features otel
+
+# Every configuration this crate ships in. This is what the pre-push hook runs.
+check-all: check check-otel
 
 # Verify formatting without modifying files (native workspace + the wasm SPA)
 fmt-check:
@@ -75,9 +85,9 @@ check-deploy:
 premerge:
     git fetch origin
     git rebase origin/main
-    just check
+    just check-all
 
-# Install git hooks (pre-push runs `just check`). Local config; run once per clone.
+# Install git hooks (pre-push runs `just check-all`). Local config; run once per clone.
 install-hooks:
     git config core.hooksPath .githooks
     @echo "pre-push hook active — bypass once with: git push --no-verify"
