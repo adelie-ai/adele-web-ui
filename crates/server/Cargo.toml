@@ -16,7 +16,6 @@ axum.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 serde.workspace = true
 toml.workspace = true
 uuid.workspace = true
@@ -43,6 +42,10 @@ desktop-assistant-uds.workspace = true
 # Only for tests: drives an axum `Router` with a request, per axum's own testing
 # guidance, to assert what the request-span middleware actually recorded.
 tower = { version = "0.5", features = ["util"] }
+# Only for tests: `test_support::Recorder` is a `tracing_subscriber::Layer` that reads
+# back what a span actually recorded. `adelie_telemetry::init` builds the shipping
+# subscriber itself; production code never touches this crate directly.
+tracing-subscriber.workspace = true
 
 [features]
 # OTLP export passthrough, off by default. With this off the BFF pulls in no

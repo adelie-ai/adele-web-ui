@@ -1,6 +1,3 @@
-// TODO(adele-web-ui#91, red commit): remove once request_span is implemented.
-#![allow(unused_imports, dead_code)]
-
 //! Per-request tracing spans and metrics for the BFF's axum router.
 //!
 //! Every inbound HTTP request gets one span, `http.request`, carrying its method, path
@@ -28,8 +25,40 @@ use tracing::Instrument;
 /// Layer this as the OUTERMOST middleware (see `main.rs`) so `status` reflects what the
 /// browser actually received, after every other layer - auth, the static-asset fallback -
 /// has run.
-pub async fn request_span(_req: Request, _next: Next) -> Response {
-    todo!("create the http.request span, run `next` inside it, and record status + metrics")
+pub async fn request_span(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+
+    let span = tracing::info_span!(
+        "http.request",
+        method = %method,
+        path = %path,
+        status = tracing::field::Empty,
+    );
+
+    metrics::increment(
+        "http.requests.started",
+        &[Label::new("route", path.clone())],
+    );
+
+    let start = Instant::now();
+    let response = async { next.run(req).await }.instrument(span.clone()).await;
+    let elapsed = start.elapsed();
+
+    let status = response.status().as_u16();
+    span.record("status", status);
+
+    metrics::record_duration(
+        "http.request.duration",
+        elapsed,
+        &[
+            Label::new("route", path.clone()),
+            Label::new("status", status.to_string()),
+        ],
+    );
+    metrics::increment("http.requests.completed", &[Label::new("route", path)]);
+
+    response
 }
 
 #[cfg(test)]

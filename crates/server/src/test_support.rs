@@ -11,9 +11,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::Subscriber;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -64,7 +64,8 @@ struct FieldCollector<'a>(&'a mut BTreeMap<String, String>);
 
 impl Visit for FieldCollector<'_> {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name().to_string(), format!("{value:?}"));
+        self.0
+            .insert(field.name().to_string(), format!("{value:?}"));
     }
 }
 

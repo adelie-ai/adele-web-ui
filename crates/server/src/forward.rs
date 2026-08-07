@@ -8,12 +8,15 @@
 //! the browser's so the SPA correlates against the id it sent.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use adelie_telemetry::metrics::{self, Label};
 use desktop_assistant_api_model as api;
 use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_application::{ApiError, ApiResult, AssistantApiHandler, EventSink};
 use desktop_assistant_client_common::{AssistantCommands, Connector, SignalEvent};
 use desktop_assistant_core::ports::transport::current_client_context;
+use tracing::Instrument;
 
 pub struct ForwardingHandler {
     connector: Arc<Connector>,
@@ -51,12 +54,26 @@ impl AssistantApiHandler for ForwardingHandler {
         // fetches — passes through untouched. Compute the gate before `cmd` moves
         // into `send_command`.
         let is_get_conversation = matches!(cmd, api::Command::GetConversation { .. });
-        let result = self
-            .commands()?
-            .send_command(cmd)
-            .await
-            .map_err(|e| ApiError::Core(e.to_string()))?;
-        Ok(browser_conversation_result(is_get_conversation, result))
+
+        // One span per forwarded daemon call (adele-web-ui#91): `kind` is the bare
+        // variant name only, never a field value, so this stays INFO-safe under D10
+        // regardless of which command it wraps.
+        let kind = command_kind(&cmd);
+        let span = tracing::info_span!("daemon.call", command = %kind);
+        let start = Instant::now();
+
+        let sent = async {
+            self.commands()?
+                .send_command(cmd)
+                .await
+                .map_err(|e| ApiError::Core(e.to_string()))
+        }
+        .instrument(span)
+        .await;
+
+        record_daemon_call(&kind, start.elapsed(), sent.is_err());
+
+        Ok(browser_conversation_result(is_get_conversation, sent?))
     }
 
     async fn handle_send_message(
@@ -80,6 +97,57 @@ impl AssistantApiHandler for ForwardingHandler {
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_send_message_with_override(
+        &self,
+        conversation_id: String,
+        content: String,
+        override_selection: Option<api::SendPromptOverride>,
+        system_refinement: String,
+        request_id: String,
+        idempotency_key: Option<String>,
+        sink: Arc<dyn EventSink>,
+    ) -> ApiResult<()> {
+        // One span for the whole forwarded turn (adele-web-ui#91): from the SendMessage
+        // that starts it to the terminal event that ends it. `command` never carries the
+        // prompt - only the fixed variant name - so this stays INFO-safe under D10.
+        let span = tracing::info_span!("daemon.call", command = %"SendMessage");
+        let start = Instant::now();
+
+        let result = self
+            .send_message_forward(
+                conversation_id,
+                content,
+                override_selection,
+                system_refinement,
+                request_id,
+                idempotency_key,
+                sink,
+            )
+            .instrument(span)
+            .await;
+
+        record_daemon_call("SendMessage", start.elapsed(), result.is_err());
+        result
+    }
+
+    /// Hand the dispatcher the shared browser-session registry (#33). This is the
+    /// `ws-interface`'s sanctioned seam for server-initiated pushes: the
+    /// dispatcher registers each browser connection's outbound sink here at
+    /// connect and applies its `SubscribeConversations`. The background relay
+    /// ([`crate::relay::run_relay`]) then fans the daemon's cross-client /
+    /// background events to those sessions through this same registry. Returning
+    /// `None` (the old default) is what left live sync / scratchpad undelivered.
+    fn conversation_subscriptions(&self) -> Option<Arc<ConversationSubscriptions>> {
+        Some(Arc::clone(&self.subs))
+    }
+}
+
+impl ForwardingHandler {
+    /// The forwarded-turn body `handle_send_message_with_override` wraps in a
+    /// `daemon.call` span. Kept as its own method (rather than inline in the trait
+    /// method) so the span and timing wrapper stay a plain, uninstrumented view of what
+    /// actually happens.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_forward(
         &self,
         conversation_id: String,
         content: String,
@@ -147,17 +215,6 @@ impl AssistantApiHandler for ForwardingHandler {
             }
         }
         Ok(())
-    }
-
-    /// Hand the dispatcher the shared browser-session registry (#33). This is the
-    /// `ws-interface`'s sanctioned seam for server-initiated pushes: the
-    /// dispatcher registers each browser connection's outbound sink here at
-    /// connect and applies its `SubscribeConversations`. The background relay
-    /// ([`crate::relay::run_relay`]) then fans the daemon's cross-client /
-    /// background events to those sessions through this same registry. Returning
-    /// `None` (the old default) is what left live sync / scratchpad undelivered.
-    fn conversation_subscriptions(&self) -> Option<Arc<ConversationSubscriptions>> {
-        Some(Arc::clone(&self.subs))
     }
 }
 
@@ -333,8 +390,6 @@ fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::
     current.as_ref().and_then(browser_scoped_client_context)
 }
 
-// TODO(adele-web-ui#91, red commit): remove once handle_command calls this for real.
-#[allow(dead_code)]
 /// The command's variant name only, safe to record on the `daemon.call` span at INFO
 /// under the D10 level contract - never a field value.
 ///
@@ -343,8 +398,23 @@ fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::
 /// carries fields. Splitting on the first of those keeps the name and discards the
 /// fields before anything downstream can log them - the full debug string is read here
 /// and never itself logged.
-fn command_kind(_cmd: &api::Command) -> String {
-    todo!("split the Debug repr on the first ' ', '{{' or '(' and keep only the prefix")
+fn command_kind(cmd: &api::Command) -> String {
+    let debug = format!("{cmd:?}");
+    debug
+        .split([' ', '{', '('])
+        .next()
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Record the `daemon_call.duration` histogram and, on failure, the
+/// `daemon_call.failures` counter for one forwarded daemon call.
+fn record_daemon_call(command: &str, elapsed: Duration, failed: bool) {
+    let labels = [Label::new("command", command.to_string())];
+    metrics::record_duration("daemon_call.duration", elapsed, &labels);
+    if failed {
+        metrics::increment("daemon_call.failures", &labels);
+    }
 }
 
 #[cfg(test)]
