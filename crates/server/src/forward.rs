@@ -333,12 +333,29 @@ fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::
     current.as_ref().and_then(browser_scoped_client_context)
 }
 
+// TODO(adele-web-ui#91, red commit): remove once handle_command calls this for real.
+#[allow(dead_code)]
+/// The command's variant name only, safe to record on the `daemon.call` span at INFO
+/// under the D10 level contract - never a field value.
+///
+/// `Command` derives `Debug`, and the derived output for any variant always begins with
+/// the bare variant identifier, followed by a space, a `{` or a `(` for anything that
+/// carries fields. Splitting on the first of those keeps the name and discards the
+/// fields before anything downstream can log them - the full debug string is read here
+/// and never itself logged.
+fn command_kind(_cmd: &api::Command) -> String {
+    todo!("split the Debug repr on the first ' ', '{{' or '(' and keep only the prefix")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DAEMON_RID: &str = "daemon-req-1";
     const BROWSER_RID: &str = "browser-req-1";
+    /// A distinctive reply body the D10 content test looks for. It must never appear in
+    /// any captured span or event field.
+    const REPLY_MARKER: &str = "REPLY_MARKER_TOKEN_never_at_info";
 
     fn mv(role: &str, content: &str) -> api::MessageView {
         api::MessageView {
@@ -706,7 +723,7 @@ mod tests {
             sink.emit(api::Event::AssistantCompleted {
                 conversation_id,
                 request_id,
-                full_response: String::new(),
+                full_response: REPLY_MARKER.to_string(),
             })
             .await;
             Ok(())
@@ -814,5 +831,125 @@ mod tests {
             Some(Some(KEY.to_string())),
             "the browser SendMessage.idempotency_key must reach the daemon-side command"
         );
+    }
+
+    // --- adele-web-ui#91: a span per forwarded daemon call, content-free (D10) --------
+
+    /// Acceptance: `command_kind` carries only the variant name, never a field value -
+    /// the mechanism the `daemon.call` span's `command` field relies on to stay
+    /// content-free for every command, not only `SendMessage`.
+    #[test]
+    fn command_kind_strips_field_values() {
+        let cmd = api::Command::RenameConversation {
+            id: "c1".to_string(),
+            title: "MARKER_USER_SUPPLIED_TITLE".to_string(),
+        };
+        let kind = command_kind(&cmd);
+        assert_eq!(kind, "RenameConversation");
+        assert!(
+            !kind.contains("MARKER_USER_SUPPLIED_TITLE"),
+            "the command label must carry only the variant name, never a field value; \
+             got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn command_kind_of_a_unit_variant_is_the_variant_name() {
+        assert_eq!(command_kind(&api::Command::Ping), "Ping");
+    }
+
+    /// Acceptance (epic D10): the prompt a browser sends and the reply the daemon
+    /// returns never reach an INFO-level span field. Drives `handle_send_message_with_
+    /// override` over a real UDS daemon double (the same pattern as the idempotency-key
+    /// test above), with a tracing capture layer installed so the test reads back what
+    /// the `daemon.call` span actually recorded instead of trusting the code that wrote
+    /// it.
+    #[tokio::test]
+    async fn no_request_or_reply_body_at_info() {
+        use crate::test_support::Recorder;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        const PROMPT_MARKER: &str = "PROMPT_MARKER_TOKEN_never_at_info";
+
+        let recorder = Recorder::new();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let _tracing_guard = tracing::subscriber::set_default(subscriber);
+
+        let dir =
+            std::env::temp_dir().join(format!("adele-web-ui-content-{}", uuid::Uuid::new_v4()));
+        let socket_path = dir.join("d.sock");
+
+        let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
+            captured: Arc::new(Mutex::new(None)),
+        });
+        let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
+        let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = server
+                .serve_with_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        wait_for_socket(&socket_path).await;
+
+        let config = ConnectionConfig {
+            transport_mode: TransportMode::Uds,
+            socket_path: Some(socket_path.clone()),
+            ws_jwt: Some("test-token".to_string()),
+            share_client_context: false,
+            ..ConnectionConfig::default()
+        };
+        let connector = Arc::new(Connector::connect(&config).await.expect("connect over uds"));
+        let subs = Arc::new(ConversationSubscriptions::new());
+        let forwarding = ForwardingHandler::new(connector, subs);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                PROMPT_MARKER.to_string(),
+                None,
+                String::new(),
+                "browser-req-1".to_string(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let daemon_call_spans: Vec<_> = recorder
+            .spans()
+            .into_iter()
+            .filter(|span| span.name == "daemon.call")
+            .collect();
+        assert!(
+            !daemon_call_spans.is_empty(),
+            "a daemon.call span must wrap the forwarded SendMessage"
+        );
+
+        for span in &daemon_call_spans {
+            assert_eq!(
+                span.fields.get("command").map(String::as_str),
+                Some("SendMessage"),
+                "the daemon.call span must name the command it wraps"
+            );
+            for (key, value) in &span.fields {
+                assert!(
+                    !value.contains(PROMPT_MARKER),
+                    "daemon.call span field {key:?} carried the prompt: {value:?}"
+                );
+                assert!(
+                    !value.contains(REPLY_MARKER),
+                    "daemon.call span field {key:?} carried the reply: {value:?}"
+                );
+            }
+        }
     }
 }

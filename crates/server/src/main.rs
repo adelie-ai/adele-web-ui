@@ -14,6 +14,9 @@ mod daemon_conn;
 mod forward;
 mod relay;
 mod subs_forward;
+#[cfg(test)]
+mod test_support;
+mod telemetry;
 mod ws_auth;
 
 use std::sync::Arc;
