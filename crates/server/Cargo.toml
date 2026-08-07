@@ -29,7 +29,7 @@ desktop-assistant-core.workspace = true
 
 # Shared telemetry: subscriber construction, the three OTLP pipelines, the metrics
 # facade and the shutdown guard. Pinned by revision (mcp-core#38 epic decision D7).
-adelie-telemetry = { git = "https://github.com/adelie-ai/adelie-telemetry", rev = "59c152db11f22281ea2ae8f1c67e00389dbf74f8" }
+adelie-telemetry = { git = "https://github.com/adelie-ai/adelie-telemetry", rev = "1b8166ab483174e76aa23079858b8a31aaa52ae1" }
 
 [dev-dependencies]
 # Only for tests: constructing a `SignalEvent::ClientToolCall`'s `serde_json::Value`
