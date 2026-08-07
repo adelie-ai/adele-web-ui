@@ -18,6 +18,8 @@ use desktop_assistant_client_common::{AssistantCommands, Connector, SignalEvent}
 use desktop_assistant_core::ports::transport::current_client_context;
 use tracing::Instrument;
 
+use crate::command_kind::command_kind;
+
 pub struct ForwardingHandler {
     connector: Arc<Connector>,
     /// Per-connection browser-session registry (#33). Returned from
@@ -71,7 +73,7 @@ impl AssistantApiHandler for ForwardingHandler {
         .instrument(span)
         .await;
 
-        record_daemon_call(&kind, start.elapsed(), sent.is_err());
+        record_daemon_call(kind, start.elapsed(), sent.is_err());
 
         Ok(browser_conversation_result(is_get_conversation, sent?))
     }
@@ -109,7 +111,13 @@ impl AssistantApiHandler for ForwardingHandler {
         // One span for the whole forwarded turn (adele-web-ui#91): from the SendMessage
         // that starts it to the terminal event that ends it. `command` never carries the
         // prompt - only the fixed variant name - so this stays INFO-safe under D10.
-        let span = tracing::info_span!("daemon.call", command = %"SendMessage");
+        // `conversation_id` is an id, which D10 permits at INFO; it is what lets a query
+        // return every turn in a conversation without any of them sharing a trace (D13).
+        let span = tracing::info_span!(
+            "daemon.call",
+            command = %"SendMessage",
+            conversation_id = %conversation_id,
+        );
         let start = Instant::now();
 
         let result = self
@@ -388,23 +396,6 @@ fn browser_scoped_client_context(ctx: &api::ClientContext) -> Option<api::Client
 /// ever forwarded.
 fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::ClientContext> {
     current.as_ref().and_then(browser_scoped_client_context)
-}
-
-/// The command's variant name only, safe to record on the `daemon.call` span at INFO
-/// under the D10 level contract - never a field value.
-///
-/// `Command` derives `Debug`, and the derived output for any variant always begins with
-/// the bare variant identifier, followed by a space, a `{` or a `(` for anything that
-/// carries fields. Splitting on the first of those keeps the name and discards the
-/// fields before anything downstream can log them - the full debug string is read here
-/// and never itself logged.
-fn command_kind(cmd: &api::Command) -> String {
-    let debug = format!("{cmd:?}");
-    debug
-        .split([' ', '{', '('])
-        .next()
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 /// Record the `daemon_call.duration` histogram and, on failure, the
@@ -904,29 +895,7 @@ mod tests {
     }
 
     // --- adele-web-ui#91: a span per forwarded daemon call, content-free (D10) --------
-
-    /// Acceptance: `command_kind` carries only the variant name, never a field value -
-    /// the mechanism the `daemon.call` span's `command` field relies on to stay
-    /// content-free for every command, not only `SendMessage`.
-    #[test]
-    fn command_kind_strips_field_values() {
-        let cmd = api::Command::RenameConversation {
-            id: "c1".to_string(),
-            title: "MARKER_USER_SUPPLIED_TITLE".to_string(),
-        };
-        let kind = command_kind(&cmd);
-        assert_eq!(kind, "RenameConversation");
-        assert!(
-            !kind.contains("MARKER_USER_SUPPLIED_TITLE"),
-            "the command label must carry only the variant name, never a field value; \
-             got {kind:?}"
-        );
-    }
-
-    #[test]
-    fn command_kind_of_a_unit_variant_is_the_variant_name() {
-        assert_eq!(command_kind(&api::Command::Ping), "Ping");
-    }
+    // `command_kind` itself is tested in its own module (`crate::command_kind`).
 
     /// Acceptance (epic D10): the prompt a browser sends and the reply the daemon
     /// returns never reach an INFO-level span field. Drives `handle_send_message_with_
@@ -1021,5 +990,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Acceptance (review finding #3, epic D13): "Carry conversation_id as an
+    /// attribute. A conversation is not a trace; it is an attribute that lets one
+    /// query return every turn in it." `conversation_id` is an id, which D10 permits
+    /// at INFO, so it must reach the `daemon.call` span the forwarded SendMessage turn
+    /// wraps.
+    #[tokio::test]
+    async fn daemon_call_span_carries_conversation_id() {
+        use crate::test_support::Recorder;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        const CONVERSATION_ID: &str = "conversation-under-test";
+
+        let recorder = Recorder::new();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let _tracing_guard = tracing::subscriber::set_default(subscriber);
+
+        let dir =
+            std::env::temp_dir().join(format!("adele-web-ui-convid-{}", uuid::Uuid::new_v4()));
+        let socket_path = dir.join("d.sock");
+
+        let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
+            captured: Arc::new(Mutex::new(None)),
+        });
+        let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
+        let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = server
+                .serve_with_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        wait_for_socket(&socket_path).await;
+
+        let config = ConnectionConfig {
+            transport_mode: TransportMode::Uds,
+            socket_path: Some(socket_path.clone()),
+            ws_jwt: Some("test-token".to_string()),
+            share_client_context: false,
+            ..ConnectionConfig::default()
+        };
+        let connector = Arc::new(Connector::connect(&config).await.expect("connect over uds"));
+        let subs = Arc::new(ConversationSubscriptions::new());
+        let forwarding = ForwardingHandler::new(connector, subs);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                CONVERSATION_ID.to_string(),
+                "hi".to_string(),
+                None,
+                String::new(),
+                "browser-req-1".to_string(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let daemon_call = recorder
+            .spans()
+            .into_iter()
+            .find(|span| span.name == "daemon.call")
+            .expect("a daemon.call span must wrap the forwarded SendMessage");
+        assert_eq!(
+            daemon_call
+                .fields
+                .get("conversation_id")
+                .map(String::as_str),
+            Some(CONVERSATION_ID),
+            "the daemon.call span must carry conversation_id (D13), so one query \
+             returns every turn in a conversation"
+        );
     }
 }

@@ -9,6 +9,7 @@
 //! served once the Leptos app lands (Step 2).
 
 mod auth;
+mod command_kind;
 mod config;
 mod daemon_conn;
 mod forward;
