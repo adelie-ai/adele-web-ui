@@ -16,6 +16,7 @@ use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_application::{ApiError, ApiResult, AssistantApiHandler, EventSink};
 use desktop_assistant_client_common::{AssistantCommands, Connector, SignalEvent};
 use desktop_assistant_core::ports::transport::current_client_context;
+use desktop_assistant_core::ports::turn_telemetry::outbound_traceparent;
 use tracing::Instrument;
 
 use crate::command_kind::command_kind;
@@ -191,10 +192,17 @@ impl ForwardingHandler {
                 system_refinement,
                 client_context,
                 idempotency_key,
-                // TODO(trace propagation): forward the browser's real turn_id
-                // and traceparent instead of stubbing them out.
-                turn_id: None,
-                traceparent: None,
+                // Forward the browser's own turn id rather than minting a new
+                // one. The embedded front door (`ws-interface`) dispatches
+                // through the same request-scope machinery the daemon uses, so
+                // by the time this handler runs, `request_id` already IS that
+                // adopted-or-minted value — passing it through keeps one id
+                // across the browser, the BFF and the daemon.
+                turn_id: Some(request_id.clone()),
+                // Only set when this process genuinely continues a trace of its
+                // own; `None` when it does not, so the daemon never joins a
+                // trace nobody started.
+                traceparent: outbound_traceparent(),
             })
             .await
             .map_err(|e| ApiError::Core(e.to_string()))?;

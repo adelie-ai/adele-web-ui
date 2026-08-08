@@ -1608,8 +1608,16 @@ impl Engine {
             system_refinement: system_refinement.unwrap_or_default(),
             client_context,
             idempotency_key,
-            // TODO(trace propagation): mint and forward a real turn_id.
-            turn_id: None,
+            // A fresh per-turn correlation id (trace propagation): the browser
+            // is the top of the turn, so it mints one uuid per send here — the
+            // same value the daemon adopts as the `request_id` it stamps on
+            // every streamed event, so one id threads through the browser's own
+            // log, the BFF and the daemon. Minted per call (never reused across
+            // sends), so two turns never merge into one trace.
+            turn_id: Some(uuid::Uuid::new_v4().to_string()),
+            // The SPA has no trace of its own to continue — it is where a trace
+            // starts, not a caller already inside one — so it never sets this;
+            // `turn_id` alone is enough for the daemon to derive a trace.
             traceparent: None,
         }
     }
@@ -1638,6 +1646,16 @@ impl Engine {
             system_refinement,
             idempotency_key,
         );
+        // Print the turn id to the browser console (in the browser) or stdout
+        // (in a host test) so a person can read it off the page and paste it
+        // into a daemon log line or a trace backend.
+        if let Command::SendMessage {
+            turn_id: Some(ref turn_id),
+            ..
+        } = cmd
+        {
+            leptos::logging::log!("Adele turn_id: {turn_id}");
+        }
         let tx = self.ui_tx.clone();
         spawn_local(async move {
             match transport.send_command(cmd).await {
