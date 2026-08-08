@@ -6,17 +6,27 @@
 //! daemon assigns its own `request_id` (returned in `SendMessageAck`); we route
 //! that turn's events off the Connector's signal stream and rewrite the id to
 //! the browser's so the SPA correlates against the id it sent.
+//!
+//! The Connector is shared: one daemon connection multiplexes every browser
+//! session, and [`project_turn_event`] demultiplexes a turn's events off that
+//! one broadcast stream by matching `request_id` alone. That match is sound
+//! only when nothing outside this process chooses the value, so the
+//! `Command::SendMessage.turn_id` this handler sends the daemon is always
+//! minted here - never the browser's own id. The browser's id still travels,
+//! as the trace the forwarded `traceparent` names (see
+//! [`browser_traceparent`]), so the browser, the BFF and the daemon still
+//! land in one trace; only the daemon-facing correlation id is BFF-owned.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use adelie_telemetry::metrics::{self, Label};
+use adelie_telemetry::{TraceParent, trace_id_from_uuid};
 use desktop_assistant_api_model as api;
 use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_application::{ApiError, ApiResult, AssistantApiHandler, EventSink};
 use desktop_assistant_client_common::{AssistantCommands, Connector, SignalEvent};
 use desktop_assistant_core::ports::transport::current_client_context;
-use desktop_assistant_core::ports::turn_telemetry::outbound_traceparent;
 use tracing::Instrument;
 
 use crate::command_kind::command_kind;
@@ -192,17 +202,17 @@ impl ForwardingHandler {
                 system_refinement,
                 client_context,
                 idempotency_key,
-                // Forward the browser's own turn id rather than minting a new
-                // one. The embedded front door (`ws-interface`) dispatches
-                // through the same request-scope machinery the daemon uses, so
-                // by the time this handler runs, `request_id` already IS that
-                // adopted-or-minted value — passing it through keeps one id
-                // across the browser, the BFF and the daemon.
-                turn_id: Some(request_id.clone()),
-                // Only set when this process genuinely continues a trace of its
-                // own; `None` when it does not, so the daemon never joins a
-                // trace nobody started.
-                traceparent: outbound_traceparent(),
+                // Always minted here, never the browser's own id (see the
+                // module doc): this is the value `project_turn_event` below
+                // demultiplexes the shared Connector's broadcast by, so it
+                // must stay a value only this process can choose.
+                turn_id: Some(uuid::Uuid::new_v4().to_string()),
+                // The browser's trace travels here instead, built from the id
+                // the browser minted, so the daemon still joins the same
+                // trace the browser started even though `turn_id` above is a
+                // different value. `None` when the browser sent nothing
+                // usable: an invented trace is worse than none.
+                traceparent: browser_traceparent(&request_id),
             })
             .await
             .map_err(|e| ApiError::Core(e.to_string()))?;
@@ -408,6 +418,25 @@ fn browser_scoped_client_context(ctx: &api::ClientContext) -> Option<api::Client
 /// ever forwarded.
 fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::ClientContext> {
     current.as_ref().and_then(browser_scoped_client_context)
+}
+
+/// The `traceparent` naming the trace `browser_turn_id` spells, for
+/// forwarding to the daemon as a caller-supplied trace to continue.
+///
+/// A uuid is the same 16 bytes a W3C trace id is, so the browser's own turn
+/// id becomes the trace id directly - no lookup table, no second identifier.
+/// [`TraceParent::root_for`] is the deterministic root header for a process
+/// with no span machinery of its own, which is exactly what a wasm SPA is:
+/// the same `browser_turn_id` always produces the same header, so the daemon
+/// joins the one trace that id names rather than starting a new one.
+///
+/// `None` when `browser_turn_id` does not parse as a uuid or is the nil
+/// uuid: an invented trace is worse than none, because a receiver that joins
+/// a trace nobody started makes the trace wrong rather than absent.
+fn browser_traceparent(browser_turn_id: &str) -> Option<String> {
+    let uuid = uuid::Uuid::parse_str(browser_turn_id).ok()?;
+    let trace_id = trace_id_from_uuid(uuid.into_bytes()).ok()?;
+    Some(TraceParent::root_for(trace_id, true).to_header())
 }
 
 /// Record the `daemon_call.duration` histogram and, on failure, the
@@ -936,20 +965,22 @@ mod tests {
         );
     }
 
-    // --- adele-web-ui trace propagation: the BFF forwards the browser's turn
-    // id rather than minting its own, and still forwards when there is none to
-    // adopt. -------------------------------------------------------------------
+    // --- adele-web-ui trace propagation: the BFF mints its own daemon-facing
+    // turn id (it is the value the shared Connector's broadcast is demuxed
+    // by, in `project_turn_event` below, so it must stay BFF-owned) and
+    // carries the browser's trace in `traceparent` instead. -------------------
 
     #[tokio::test]
-    async fn the_bff_forwards_the_browser_turn_id() {
-        // A valid, non-nil uuid — the shape the SPA mints and hands to this
-        // method as `request_id` (the front door has already adopted it by the
-        // time `ForwardingHandler` runs). If the forwarder passes it through
-        // rather than minting its own, the daemon-side dispatcher adopts this
-        // exact value as its own request_id instead of a fresh one.
-        let turn_id = uuid::Uuid::new_v4().to_string();
+    async fn the_bff_mints_its_own_turn_id() {
+        // Two sends that carry the SAME id from the browser's side — a
+        // collision, deliberate or coincidental. If the BFF forwarded it as
+        // `turn_id` rather than minting its own, the daemon would adopt the
+        // identical value for both turns, and `project_turn_event`'s
+        // `request_id`-only filter over the shared per-connection broadcast
+        // would then deliver each turn's events to the other browser too.
+        let colliding_id = uuid::Uuid::new_v4().to_string();
         let (forwarding, _captured, captured_request_id, shutdown_tx, dir) =
-            spawn_capturing_daemon("turnid").await;
+            spawn_capturing_daemon("mint").await;
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -958,7 +989,7 @@ mod tests {
                 "hi".to_string(),
                 None,
                 String::new(),
-                turn_id.clone(),
+                colliding_id.clone(),
                 None,
                 Arc::new(NoopSink),
             ),
@@ -966,24 +997,73 @@ mod tests {
         .await
         .expect("forwarding did not complete within 5s (terminal event missed?)")
         .expect("forwarding succeeds");
+        let first = captured_request_id.lock().unwrap().clone();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                "hi again".to_string(),
+                None,
+                String::new(),
+                colliding_id.clone(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+        let second = captured_request_id.lock().unwrap().clone();
 
         let _ = shutdown_tx.send(());
         let _ = std::fs::remove_dir_all(&dir);
 
-        let seen = captured_request_id.lock().unwrap().clone();
+        assert!(
+            first.is_some() && second.is_some(),
+            "both sends must reach the daemon-side handler"
+        );
+        assert_ne!(
+            first, second,
+            "two browser sends carrying the same id must not mint the same daemon-side turn id"
+        );
+    }
+
+    #[test]
+    fn the_bff_forwards_the_browser_trace() {
+        // The header must name the trace id the browser's own turn id
+        // spells, so the daemon joins that exact trace rather than one
+        // derived from whatever id the BFF minted for `turn_id` above.
+        let browser_turn_id = "550e8400-e29b-41d4-a716-446655440000";
+        let header = browser_traceparent(browser_turn_id)
+            .expect("a valid, non-nil uuid must produce a traceparent");
+
+        let parsed =
+            adelie_telemetry::extract_traceparent(&header).expect("a well-formed traceparent");
+        let expected_trace_id = trace_id_from_uuid(
+            uuid::Uuid::parse_str(browser_turn_id)
+                .expect("test fixture is a valid uuid")
+                .into_bytes(),
+        )
+        .expect("a valid non-nil uuid is a valid trace id");
+
         assert_eq!(
-            seen,
-            Some(turn_id),
-            "the browser's turn id must reach the daemon-side command unchanged, not re-minted"
+            parsed.trace_id(),
+            expected_trace_id,
+            "the traceparent must name the trace id the browser's turn id spells"
         );
     }
 
     #[tokio::test]
-    async fn a_send_without_a_turn_id_still_forwards() {
-        // "browser-req-1" is not a uuid — the shape a caller with no adoptable
-        // turn id (an older SPA, or a non-turn caller) hands this method. The
-        // forward must still complete: turn_id is optional in both directions,
-        // so a value the daemon cannot adopt is not a reason to refuse the send.
+    async fn a_browser_send_without_a_turn_id_still_forwards() {
+        // "browser-req-1" is not a uuid — an older SPA (or a caller with
+        // nothing usable) hands this method a value that spells no trace.
+        assert_eq!(
+            browser_traceparent("browser-req-1"),
+            None,
+            "a non-uuid id must not produce an invented traceparent"
+        );
+
         let (forwarding, _captured, captured_request_id, shutdown_tx, dir) =
             spawn_capturing_daemon("noturnid").await;
 
@@ -1001,16 +1081,16 @@ mod tests {
         )
         .await
         .expect("forwarding did not complete within 5s (terminal event missed?)")
-        .expect("forwarding must still succeed with no adoptable turn id");
+        .expect("forwarding must still succeed with no adoptable browser id");
 
         let _ = shutdown_tx.send(());
         let _ = std::fs::remove_dir_all(&dir);
 
-        // The daemon-side dispatcher still ran and assigned SOME request id —
-        // the send was never refused for lacking a turn id.
+        // The BFF must still mint its own turn_id and the send must still
+        // reach the daemon — an unusable browser id is not a refusal reason.
         assert!(
             captured_request_id.lock().unwrap().is_some(),
-            "the daemon-side handler must still run and receive a request_id"
+            "the BFF must still mint a turn_id and the send must still reach the daemon"
         );
     }
 
