@@ -1608,6 +1608,17 @@ impl Engine {
             system_refinement: system_refinement.unwrap_or_default(),
             client_context,
             idempotency_key,
+            // A fresh per-turn correlation id (trace propagation): the browser
+            // is the top of the turn, so it mints one uuid per send here — the
+            // same value the daemon adopts as the `request_id` it stamps on
+            // every streamed event, so one id threads through the browser's own
+            // log, the BFF and the daemon. Minted per call (never reused across
+            // sends), so two turns never merge into one trace.
+            turn_id: Some(uuid::Uuid::new_v4().to_string()),
+            // The SPA has no trace of its own to continue — it is where a trace
+            // starts, not a caller already inside one — so it never sets this;
+            // `turn_id` alone is enough for the daemon to derive a trace.
+            traceparent: None,
         }
     }
 
@@ -1635,6 +1646,16 @@ impl Engine {
             system_refinement,
             idempotency_key,
         );
+        // Print the turn id to the browser console (in the browser) or stdout
+        // (in a host test) so a person can read it off the page and paste it
+        // into a daemon log line or a trace backend.
+        if let Command::SendMessage {
+            turn_id: Some(ref turn_id),
+            ..
+        } = cmd
+        {
+            leptos::logging::log!("Adele turn_id: {turn_id}");
+        }
         let tx = self.ui_tx.clone();
         spawn_local(async move {
             match transport.send_command(cmd).await {
@@ -2263,6 +2284,49 @@ mod tests {
             ),
             other => panic!("expected SendMessage, got {other:?}"),
         }
+    }
+
+    // --- adele-web-ui trace propagation: the browser mints a per-turn
+    // correlation id (`turn_id`) so one value threads through the browser's own
+    // log, the BFF and the daemon. Minting cost nothing and works with no trace
+    // exporter at all — the SPA never sets `traceparent`, only the id. ---------
+
+    #[test]
+    fn send_command_carries_a_turn_id() {
+        let owner = Owner::new();
+        owner.set();
+        let (engine, _view) = engine_and_view();
+        match engine.build_send_command("c1".to_string(), "hi".to_string(), None, None) {
+            Command::SendMessage { turn_id, .. } => {
+                let id = turn_id.expect("build_send_command must mint a turn_id");
+                let parsed = uuid::Uuid::parse_str(&id).expect("turn_id must be a valid UUID");
+                assert!(!parsed.is_nil(), "turn_id must not be the nil UUID");
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_turns_get_different_turn_ids() {
+        // Minting is per turn, not per session or per engine: two independent
+        // sends sharing a turn_id would merge two distinct traces into one.
+        let owner = Owner::new();
+        owner.set();
+        let (engine, _view) = engine_and_view();
+
+        let mint = |engine: &Engine| match engine.build_send_command(
+            "c1".to_string(),
+            "hi".to_string(),
+            None,
+            None,
+        ) {
+            Command::SendMessage { turn_id, .. } => turn_id.expect("each send mints a turn_id"),
+            other => panic!("expected SendMessage, got {other:?}"),
+        };
+
+        let id_a = mint(&engine);
+        let id_b = mint(&engine);
+        assert_ne!(id_a, id_b, "two turns must not share a correlation id");
     }
 
     // --- AC9: sync_view must not clobber a live composer draft ----------------

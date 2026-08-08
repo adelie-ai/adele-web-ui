@@ -6,11 +6,22 @@
 //! daemon assigns its own `request_id` (returned in `SendMessageAck`); we route
 //! that turn's events off the Connector's signal stream and rewrite the id to
 //! the browser's so the SPA correlates against the id it sent.
+//!
+//! The Connector is shared: one daemon connection multiplexes every browser
+//! session, and [`project_turn_event`] demultiplexes a turn's events off that
+//! one broadcast stream by matching `request_id` alone. That match is sound
+//! only when nothing outside this process chooses the value, so the
+//! `Command::SendMessage.turn_id` this handler sends the daemon is always
+//! minted here - never the browser's own id. The browser's id still travels,
+//! as the trace the forwarded `traceparent` names (see
+//! [`browser_traceparent`]), so the browser, the BFF and the daemon still
+//! land in one trace; only the daemon-facing correlation id is BFF-owned.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use adelie_telemetry::metrics::{self, Label};
+use adelie_telemetry::{TraceParent, trace_id_from_uuid};
 use desktop_assistant_api_model as api;
 use desktop_assistant_application::conversation_subs::ConversationSubscriptions;
 use desktop_assistant_application::{ApiError, ApiResult, AssistantApiHandler, EventSink};
@@ -191,6 +202,17 @@ impl ForwardingHandler {
                 system_refinement,
                 client_context,
                 idempotency_key,
+                // Always minted here, never the browser's own id (see the
+                // module doc): this is the value `project_turn_event` below
+                // demultiplexes the shared Connector's broadcast by, so it
+                // must stay a value only this process can choose.
+                turn_id: Some(uuid::Uuid::new_v4().to_string()),
+                // The browser's trace travels here instead, built from the id
+                // the browser minted, so the daemon still joins the same
+                // trace the browser started even though `turn_id` above is a
+                // different value. `None` when the browser sent nothing
+                // usable: an invented trace is worse than none.
+                traceparent: browser_traceparent(&request_id),
             })
             .await
             .map_err(|e| ApiError::Core(e.to_string()))?;
@@ -396,6 +418,25 @@ fn browser_scoped_client_context(ctx: &api::ClientContext) -> Option<api::Client
 /// ever forwarded.
 fn forwarded_client_context(current: Option<api::ClientContext>) -> Option<api::ClientContext> {
     current.as_ref().and_then(browser_scoped_client_context)
+}
+
+/// The `traceparent` naming the trace `browser_turn_id` spells, for
+/// forwarding to the daemon as a caller-supplied trace to continue.
+///
+/// A uuid is the same 16 bytes a W3C trace id is, so the browser's own turn
+/// id becomes the trace id directly - no lookup table, no second identifier.
+/// [`TraceParent::root_for`] is the deterministic root header for a process
+/// with no span machinery of its own, which is exactly what a wasm SPA is:
+/// the same `browser_turn_id` always produces the same header, so the daemon
+/// joins the one trace that id names rather than starting a new one.
+///
+/// `None` when `browser_turn_id` does not parse as a uuid or is the nil
+/// uuid: an invented trace is worse than none, because a receiver that joins
+/// a trace nobody started makes the trace wrong rather than absent.
+fn browser_traceparent(browser_turn_id: &str) -> Option<String> {
+    let uuid = uuid::Uuid::parse_str(browser_turn_id).ok()?;
+    let trace_id = trace_id_from_uuid(uuid.into_bytes()).ok()?;
+    Some(TraceParent::root_for(trace_id, true).to_header())
 }
 
 /// Record the `daemon_call.duration` histogram and, on failure, the
@@ -745,11 +786,16 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// UDS daemon double: capture the `idempotency_key` the dispatcher hands the
-    /// send handler, then emit a terminal `AssistantCompleted` so the forwarding
-    /// loop breaks instead of blocking on the never-ending signal stream.
+    /// UDS daemon double: capture the `idempotency_key` and `request_id` the
+    /// dispatcher hands the send handler, then emit a terminal
+    /// `AssistantCompleted` so the forwarding loop breaks instead of blocking
+    /// on the never-ending signal stream.
     struct CapturingDaemon {
         captured: Arc<Mutex<Option<Option<String>>>>,
+        /// The `request_id` the handler actually received — the daemon-side
+        /// dispatcher's own adopted-or-minted turn id, once it reads the
+        /// forwarded `turn_id` field. `None` until a send lands.
+        captured_request_id: Arc<Mutex<Option<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -781,6 +827,7 @@ mod tests {
             sink: Arc<dyn EventSink>,
         ) -> ApiResult<()> {
             *self.captured.lock().unwrap() = Some(idempotency_key);
+            *self.captured_request_id.lock().unwrap() = Some(request_id.clone());
             sink.emit(api::Event::AssistantCompleted {
                 conversation_id,
                 request_id,
@@ -827,18 +874,34 @@ mod tests {
         panic!("uds socket {path:?} did not appear");
     }
 
-    #[tokio::test]
-    async fn forwarded_send_message_preserves_idempotency_key() {
+    /// Stand up a UDS daemon double behind a real `ForwardingHandler` +
+    /// `Connector` and return the handler to drive a send through, the two
+    /// capture slots (`idempotency_key`, `request_id`) `CapturingDaemon` fills
+    /// in, and `(shutdown, dir)` for the caller's own teardown. Shared by every
+    /// test in this module that proves a field reaches the daemon-side command
+    /// over the real transport, rather than each standing up its own socket.
+    async fn spawn_capturing_daemon(
+        label: &str,
+    ) -> (
+        ForwardingHandler,
+        Arc<Mutex<Option<Option<String>>>>,
+        Arc<Mutex<Option<String>>>,
+        tokio::sync::oneshot::Sender<()>,
+        std::path::PathBuf,
+    ) {
         let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+        let captured_request_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // The UDS server chmods the socket's PARENT to 0700, so it must be a
         // directory we own — a fresh subdir of the temp dir, never the shared
         // temp dir itself.
-        let dir = std::env::temp_dir().join(format!("adele-web-ui-idem-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("adele-web-ui-{label}-{}", uuid::Uuid::new_v4()));
         let socket_path = dir.join("d.sock");
 
         let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
             captured: Arc::clone(&captured),
+            captured_request_id: Arc::clone(&captured_request_id),
         });
         let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
         let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
@@ -863,6 +926,14 @@ mod tests {
         let connector = Arc::new(Connector::connect(&config).await.expect("connect over uds"));
         let subs = Arc::new(ConversationSubscriptions::new());
         let forwarding = ForwardingHandler::new(connector, subs);
+
+        (forwarding, captured, captured_request_id, shutdown_tx, dir)
+    }
+
+    #[tokio::test]
+    async fn forwarded_send_message_preserves_idempotency_key() {
+        let (forwarding, captured, _captured_request_id, shutdown_tx, dir) =
+            spawn_capturing_daemon("idem").await;
 
         // Feed a browser SendMessage carrying an idempotency key through the BFF.
         const KEY: &str = "turn-key-abc";
@@ -894,6 +965,135 @@ mod tests {
         );
     }
 
+    // --- adele-web-ui trace propagation: the BFF mints its own daemon-facing
+    // turn id (it is the value the shared Connector's broadcast is demuxed
+    // by, in `project_turn_event` below, so it must stay BFF-owned) and
+    // carries the browser's trace in `traceparent` instead. -------------------
+
+    #[tokio::test]
+    async fn the_bff_mints_its_own_turn_id() {
+        // Two sends that carry the SAME id from the browser's side — a
+        // collision, deliberate or coincidental. If the BFF forwarded it as
+        // `turn_id` rather than minting its own, the daemon would adopt the
+        // identical value for both turns, and `project_turn_event`'s
+        // `request_id`-only filter over the shared per-connection broadcast
+        // would then deliver each turn's events to the other browser too.
+        let colliding_id = uuid::Uuid::new_v4().to_string();
+        let (forwarding, _captured, captured_request_id, shutdown_tx, dir) =
+            spawn_capturing_daemon("mint").await;
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                "hi".to_string(),
+                None,
+                String::new(),
+                colliding_id.clone(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+        let first = captured_request_id.lock().unwrap().clone();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                "hi again".to_string(),
+                None,
+                String::new(),
+                colliding_id.clone(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+        let second = captured_request_id.lock().unwrap().clone();
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            first.is_some() && second.is_some(),
+            "both sends must reach the daemon-side handler"
+        );
+        assert_ne!(
+            first, second,
+            "two browser sends carrying the same id must not mint the same daemon-side turn id"
+        );
+    }
+
+    #[test]
+    fn the_bff_forwards_the_browser_trace() {
+        // The header must name the trace id the browser's own turn id
+        // spells, so the daemon joins that exact trace rather than one
+        // derived from whatever id the BFF minted for `turn_id` above.
+        let browser_turn_id = "550e8400-e29b-41d4-a716-446655440000";
+        let header = browser_traceparent(browser_turn_id)
+            .expect("a valid, non-nil uuid must produce a traceparent");
+
+        let parsed =
+            adelie_telemetry::extract_traceparent(&header).expect("a well-formed traceparent");
+        let expected_trace_id = trace_id_from_uuid(
+            uuid::Uuid::parse_str(browser_turn_id)
+                .expect("test fixture is a valid uuid")
+                .into_bytes(),
+        )
+        .expect("a valid non-nil uuid is a valid trace id");
+
+        assert_eq!(
+            parsed.trace_id(),
+            expected_trace_id,
+            "the traceparent must name the trace id the browser's turn id spells"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_browser_send_without_a_turn_id_still_forwards() {
+        // "browser-req-1" is not a uuid — an older SPA (or a caller with
+        // nothing usable) hands this method a value that spells no trace.
+        assert_eq!(
+            browser_traceparent("browser-req-1"),
+            None,
+            "a non-uuid id must not produce an invented traceparent"
+        );
+
+        let (forwarding, _captured, captured_request_id, shutdown_tx, dir) =
+            spawn_capturing_daemon("noturnid").await;
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                "hi".to_string(),
+                None,
+                String::new(),
+                "browser-req-1".to_string(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding must still succeed with no adoptable browser id");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The BFF must still mint its own turn_id and the send must still
+        // reach the daemon — an unusable browser id is not a refusal reason.
+        assert!(
+            captured_request_id.lock().unwrap().is_some(),
+            "the BFF must still mint a turn_id and the send must still reach the daemon"
+        );
+    }
+
     // --- adele-web-ui#91: a span per forwarded daemon call, content-free (D10) --------
     // `command_kind` itself is tested in its own module (`crate::command_kind`).
 
@@ -920,6 +1120,7 @@ mod tests {
 
         let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
             captured: Arc::new(Mutex::new(None)),
+            captured_request_id: Arc::new(Mutex::new(None)),
         });
         let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
         let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
@@ -1014,6 +1215,7 @@ mod tests {
 
         let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
             captured: Arc::new(Mutex::new(None)),
+            captured_request_id: Arc::new(Mutex::new(None)),
         });
         let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
         let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
