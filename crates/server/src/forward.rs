@@ -191,6 +191,10 @@ impl ForwardingHandler {
                 system_refinement,
                 client_context,
                 idempotency_key,
+                // TODO(trace propagation): forward the browser's real turn_id
+                // and traceparent instead of stubbing them out.
+                turn_id: None,
+                traceparent: None,
             })
             .await
             .map_err(|e| ApiError::Core(e.to_string()))?;
@@ -745,11 +749,16 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// UDS daemon double: capture the `idempotency_key` the dispatcher hands the
-    /// send handler, then emit a terminal `AssistantCompleted` so the forwarding
-    /// loop breaks instead of blocking on the never-ending signal stream.
+    /// UDS daemon double: capture the `idempotency_key` and `request_id` the
+    /// dispatcher hands the send handler, then emit a terminal
+    /// `AssistantCompleted` so the forwarding loop breaks instead of blocking
+    /// on the never-ending signal stream.
     struct CapturingDaemon {
         captured: Arc<Mutex<Option<Option<String>>>>,
+        /// The `request_id` the handler actually received — the daemon-side
+        /// dispatcher's own adopted-or-minted turn id, once it reads the
+        /// forwarded `turn_id` field. `None` until a send lands.
+        captured_request_id: Arc<Mutex<Option<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -781,6 +790,7 @@ mod tests {
             sink: Arc<dyn EventSink>,
         ) -> ApiResult<()> {
             *self.captured.lock().unwrap() = Some(idempotency_key);
+            *self.captured_request_id.lock().unwrap() = Some(request_id.clone());
             sink.emit(api::Event::AssistantCompleted {
                 conversation_id,
                 request_id,
@@ -827,18 +837,34 @@ mod tests {
         panic!("uds socket {path:?} did not appear");
     }
 
-    #[tokio::test]
-    async fn forwarded_send_message_preserves_idempotency_key() {
+    /// Stand up a UDS daemon double behind a real `ForwardingHandler` +
+    /// `Connector` and return the handler to drive a send through, the two
+    /// capture slots (`idempotency_key`, `request_id`) `CapturingDaemon` fills
+    /// in, and `(shutdown, dir)` for the caller's own teardown. Shared by every
+    /// test in this module that proves a field reaches the daemon-side command
+    /// over the real transport, rather than each standing up its own socket.
+    async fn spawn_capturing_daemon(
+        label: &str,
+    ) -> (
+        ForwardingHandler,
+        Arc<Mutex<Option<Option<String>>>>,
+        Arc<Mutex<Option<String>>>,
+        tokio::sync::oneshot::Sender<()>,
+        std::path::PathBuf,
+    ) {
         let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+        let captured_request_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // The UDS server chmods the socket's PARENT to 0700, so it must be a
         // directory we own — a fresh subdir of the temp dir, never the shared
         // temp dir itself.
-        let dir = std::env::temp_dir().join(format!("adele-web-ui-idem-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("adele-web-ui-{label}-{}", uuid::Uuid::new_v4()));
         let socket_path = dir.join("d.sock");
 
         let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
             captured: Arc::clone(&captured),
+            captured_request_id: Arc::clone(&captured_request_id),
         });
         let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
         let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
@@ -863,6 +889,14 @@ mod tests {
         let connector = Arc::new(Connector::connect(&config).await.expect("connect over uds"));
         let subs = Arc::new(ConversationSubscriptions::new());
         let forwarding = ForwardingHandler::new(connector, subs);
+
+        (forwarding, captured, captured_request_id, shutdown_tx, dir)
+    }
+
+    #[tokio::test]
+    async fn forwarded_send_message_preserves_idempotency_key() {
+        let (forwarding, captured, _captured_request_id, shutdown_tx, dir) =
+            spawn_capturing_daemon("idem").await;
 
         // Feed a browser SendMessage carrying an idempotency key through the BFF.
         const KEY: &str = "turn-key-abc";
@@ -894,6 +928,84 @@ mod tests {
         );
     }
 
+    // --- adele-web-ui trace propagation: the BFF forwards the browser's turn
+    // id rather than minting its own, and still forwards when there is none to
+    // adopt. -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_bff_forwards_the_browser_turn_id() {
+        // A valid, non-nil uuid — the shape the SPA mints and hands to this
+        // method as `request_id` (the front door has already adopted it by the
+        // time `ForwardingHandler` runs). If the forwarder passes it through
+        // rather than minting its own, the daemon-side dispatcher adopts this
+        // exact value as its own request_id instead of a fresh one.
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let (forwarding, _captured, captured_request_id, shutdown_tx, dir) =
+            spawn_capturing_daemon("turnid").await;
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                "hi".to_string(),
+                None,
+                String::new(),
+                turn_id.clone(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding succeeds");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let seen = captured_request_id.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            Some(turn_id),
+            "the browser's turn id must reach the daemon-side command unchanged, not re-minted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_without_a_turn_id_still_forwards() {
+        // "browser-req-1" is not a uuid — the shape a caller with no adoptable
+        // turn id (an older SPA, or a non-turn caller) hands this method. The
+        // forward must still complete: turn_id is optional in both directions,
+        // so a value the daemon cannot adopt is not a reason to refuse the send.
+        let (forwarding, _captured, captured_request_id, shutdown_tx, dir) =
+            spawn_capturing_daemon("noturnid").await;
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forwarding.handle_send_message_with_override(
+                "c1".to_string(),
+                "hi".to_string(),
+                None,
+                String::new(),
+                "browser-req-1".to_string(),
+                None,
+                Arc::new(NoopSink),
+            ),
+        )
+        .await
+        .expect("forwarding did not complete within 5s (terminal event missed?)")
+        .expect("forwarding must still succeed with no adoptable turn id");
+
+        let _ = shutdown_tx.send(());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The daemon-side dispatcher still ran and assigned SOME request id —
+        // the send was never refused for lacking a turn id.
+        assert!(
+            captured_request_id.lock().unwrap().is_some(),
+            "the daemon-side handler must still run and receive a request_id"
+        );
+    }
+
     // --- adele-web-ui#91: a span per forwarded daemon call, content-free (D10) --------
     // `command_kind` itself is tested in its own module (`crate::command_kind`).
 
@@ -920,6 +1032,7 @@ mod tests {
 
         let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
             captured: Arc::new(Mutex::new(None)),
+            captured_request_id: Arc::new(Mutex::new(None)),
         });
         let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
         let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));
@@ -1014,6 +1127,7 @@ mod tests {
 
         let handler: Arc<dyn AssistantApiHandler> = Arc::new(CapturingDaemon {
             captured: Arc::new(Mutex::new(None)),
+            captured_request_id: Arc::new(Mutex::new(None)),
         });
         let auth: Arc<dyn UdsAuthValidator> = Arc::new(AllowAllAuth);
         let server = UdsServer::new(handler, auth, UdsServerConfig::new(socket_path.clone()));

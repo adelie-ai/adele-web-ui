@@ -126,6 +126,8 @@ mod tests {
             system_refinement: String::new(),
             client_context: None,
             idempotency_key: None,
+            turn_id: None,
+            traceparent: None,
         };
         assert_eq!(command_kind(&cmd), "SendMessage");
     }

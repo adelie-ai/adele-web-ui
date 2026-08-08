@@ -1608,6 +1608,9 @@ impl Engine {
             system_refinement: system_refinement.unwrap_or_default(),
             client_context,
             idempotency_key,
+            // TODO(trace propagation): mint and forward a real turn_id.
+            turn_id: None,
+            traceparent: None,
         }
     }
 
@@ -2263,6 +2266,49 @@ mod tests {
             ),
             other => panic!("expected SendMessage, got {other:?}"),
         }
+    }
+
+    // --- adele-web-ui trace propagation: the browser mints a per-turn
+    // correlation id (`turn_id`) so one value threads through the browser's own
+    // log, the BFF and the daemon. Minting cost nothing and works with no trace
+    // exporter at all — the SPA never sets `traceparent`, only the id. ---------
+
+    #[test]
+    fn send_command_carries_a_turn_id() {
+        let owner = Owner::new();
+        owner.set();
+        let (engine, _view) = engine_and_view();
+        match engine.build_send_command("c1".to_string(), "hi".to_string(), None, None) {
+            Command::SendMessage { turn_id, .. } => {
+                let id = turn_id.expect("build_send_command must mint a turn_id");
+                let parsed = uuid::Uuid::parse_str(&id).expect("turn_id must be a valid UUID");
+                assert!(!parsed.is_nil(), "turn_id must not be the nil UUID");
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_turns_get_different_turn_ids() {
+        // Minting is per turn, not per session or per engine: two independent
+        // sends sharing a turn_id would merge two distinct traces into one.
+        let owner = Owner::new();
+        owner.set();
+        let (engine, _view) = engine_and_view();
+
+        let mint = |engine: &Engine| match engine.build_send_command(
+            "c1".to_string(),
+            "hi".to_string(),
+            None,
+            None,
+        ) {
+            Command::SendMessage { turn_id, .. } => turn_id.expect("each send mints a turn_id"),
+            other => panic!("expected SendMessage, got {other:?}"),
+        };
+
+        let id_a = mint(&engine);
+        let id_b = mint(&engine);
+        assert_ne!(id_a, id_b, "two turns must not share a correlation id");
     }
 
     // --- AC9: sync_view must not clobber a live composer draft ----------------

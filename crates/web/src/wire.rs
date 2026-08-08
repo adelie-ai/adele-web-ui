@@ -146,6 +146,8 @@ mod tests {
                 system_refinement: String::new(),
                 client_context: None,
                 idempotency_key: None,
+                turn_id: None,
+                traceparent: None,
             },
         };
         let v = serde_json::to_value(&req).expect("serializes");
@@ -154,8 +156,8 @@ mod tests {
         assert_eq!(sm["conversation_id"], "c1");
         assert_eq!(sm["content"], "hi");
         // `override_selection` renames to "override"; it and the empty refinement
-        // / absent client context / absent idempotency key are skipped, matching
-        // the daemon's wire shape.
+        // / absent client context / absent idempotency key / absent turn id /
+        // absent traceparent are skipped, matching the daemon's wire shape.
         assert!(sm.get("override").is_none(), "override skipped when None");
         assert!(
             sm.get("system_refinement").is_none(),
@@ -166,6 +168,41 @@ mod tests {
             "absent client_context skipped"
         );
         assert!(sm.get("idempotency_key").is_none(), "absent key skipped");
+        assert!(sm.get("turn_id").is_none(), "absent turn_id skipped");
+        assert!(
+            sm.get("traceparent").is_none(),
+            "absent traceparent skipped"
+        );
+    }
+
+    // --- adele-web-ui trace propagation: turn_id / traceparent are optional in
+    // both directions, so an older SPA build (whose SendMessage JSON carries
+    // neither key) still parses against this newer wire type. -----------------
+
+    #[test]
+    fn an_old_shaped_send_message_still_parses() {
+        // No `turn_id` or `traceparent` key at all — the shape an SPA built
+        // before this change would have sent. `#[serde(default)]` on both
+        // fields must fill them in as `None` rather than fail the parse, so a
+        // pre-upgrade browser tab talking to a rebuilt BFF still sends.
+        let json =
+            r#"{"id":"send-1","command":{"send_message":{"conversation_id":"c1","content":"hi"}}}"#;
+        let req: WsRequest =
+            serde_json::from_str(json).expect("an old-shaped SendMessage payload must still parse");
+        match req.command {
+            Command::SendMessage {
+                turn_id,
+                traceparent,
+                ..
+            } => {
+                assert_eq!(turn_id, None, "a missing turn_id key must default to None");
+                assert_eq!(
+                    traceparent, None,
+                    "a missing traceparent key must default to None"
+                );
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
     }
 
     #[test]
