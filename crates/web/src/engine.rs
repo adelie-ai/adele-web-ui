@@ -792,6 +792,28 @@ impl Engine {
                 }
                 self.refresh_tasks()
             }
+            // --- Turn-completion correlation (client-ui-common#51) ------------
+            // The close of the correlation `spawn_send` opens: it prints the
+            // `turn_id` it mints for every send, the daemon adopts that value as
+            // the turn's `request_id`, and it returns here when the turn ends.
+            // Nothing to draw — the reducer has already finalized the reply or
+            // cleared the stream before it reports — so the whole arm is the
+            // console line, which `crate::effects::turn_report_line` builds and
+            // the tests there hold to the ids-only contract.
+            Effect::TurnFinished {
+                conversation_id,
+                request_id,
+                idempotency_key,
+                outcome,
+            } => leptos::logging::log!(
+                "{}",
+                crate::effects::turn_report_line(
+                    &conversation_id,
+                    &request_id,
+                    idempotency_key.as_deref(),
+                    &outcome,
+                )
+            ),
 
             // --- Deliberately not acted on -----------------------------------
             //
@@ -1640,6 +1662,9 @@ impl Engine {
             ));
             return;
         };
+        // The ack echoes this key back to the reducer (below), so keep a copy
+        // before the command consumes it.
+        let sent_key = idempotency_key.clone();
         let cmd = self.build_send_command(
             conversation_id.clone(),
             prompt.clone(),
@@ -1666,6 +1691,15 @@ impl Engine {
                     let _ = tx.unbounded_send(UiMessage::PromptSent {
                         task_id,
                         conversation_id,
+                        // The key of the send this ack answers, echoed back
+                        // unchanged (client-ui-common#51). Only the executor
+                        // knows the pairing: sends overlap and each runs on its
+                        // own task, so acks need not return in send order, and
+                        // anything the reducer parked would have to guess.
+                        // Carrying it makes the pairing exact, which is what
+                        // lets `Effect::TurnFinished` name the submit it closes.
+                        // `None` for a keyless send, which stays keyless.
+                        idempotency_key: sent_key,
                     });
                 }
                 Ok(other) => {
@@ -2090,6 +2124,9 @@ mod tests {
         engine.dispatch(UiMessage::PromptSent {
             task_id: String::new(),
             conversation_id: "c1".to_string(),
+            // A keyless ack: the turn is opened straight from the reducer here,
+            // not through a `submit_prompt` that would have minted a key.
+            idempotency_key: None,
         });
     }
 
@@ -2478,6 +2515,8 @@ mod tests {
         engine.dispatch(UiMessage::PromptSent {
             task_id: String::new(),
             conversation_id: "c1".to_string(),
+            // Keyless: this test drives the status line, not the send pairing.
+            idempotency_key: None,
         });
         engine.dispatch(UiMessage::StreamChunk {
             request_id: "req-2".to_string(),

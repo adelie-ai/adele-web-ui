@@ -26,6 +26,58 @@ pub enum Disposition {
     Ignored(&'static str),
 }
 
+/// The one-line console report for a turn that ended
+/// ([`Effect::TurnFinished`](client_ui_common::Effect::TurnFinished)).
+///
+/// The reducer reports a turn wherever it drops, clears or replaces a stream:
+/// the reply completes, the turn fails, the socket drops, the conversation is
+/// deleted, or a later ack replaces a turn still in flight. It reports a
+/// backgrounded conversation's turn too, which is the case the SPA could not
+/// see at all before.
+///
+/// This is the close of the correlation the send path opens. `spawn_send` mints
+/// a `turn_id` per send and prints it, the daemon adopts that value as the
+/// `request_id` it stamps on the turn's events, and it comes back here — so one
+/// id read off the browser console finds the same turn in the daemon's log or
+/// in a trace backend. Without this line a person sees every turn start and no
+/// turn end.
+///
+/// It carries ids only. [`TurnOutcome::Failed`](client_ui_common::TurnOutcome)
+/// holds daemon- or provider-supplied text that upstream documents as untrusted
+/// for telemetry — a content refusal can quote the words it refused — so the
+/// outcome reaches the line as `completed` or `failed` and the text does not.
+/// The user-facing message is the reducer's own `SetStatusText`, which the
+/// status line already renders.
+///
+/// A missing value prints `-`: `request_id` is empty when a teardown ended the
+/// turn before the daemon's id arrived, and `idempotency_key` is `None` for a
+/// keyless send and for an external turn (voice, another client) this SPA never
+/// sent.
+///
+/// Pure, and separate from the executor arm, because the executor needs live
+/// signals and a browser console; this is what the tests below can hold to the
+/// content contract.
+pub fn turn_report_line(
+    conversation_id: &str,
+    request_id: &str,
+    idempotency_key: Option<&str>,
+    outcome: &client_ui_common::TurnOutcome,
+) -> String {
+    fn or_dash(value: &str) -> &str {
+        if value.is_empty() { "-" } else { value }
+    }
+    let outcome = match outcome {
+        client_ui_common::TurnOutcome::Completed => "completed",
+        client_ui_common::TurnOutcome::Failed(_) => "failed",
+    };
+    format!(
+        "Adele turn finished: turn_id={} conversation={} idempotency_key={} outcome={outcome}",
+        or_dash(request_id),
+        or_dash(conversation_id),
+        or_dash(idempotency_key.unwrap_or_default()),
+    )
+}
+
 #[cfg(test)]
 pub mod census {
     //! One sample of every [`Effect`] variant, and the ordinal census that keeps
