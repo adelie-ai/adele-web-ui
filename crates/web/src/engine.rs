@@ -798,8 +798,8 @@ impl Engine {
             // has already finalized the reply or cleared the stream before it
             // reports — so the whole arm is the console line.
             // `crate::effects::turn_report_line` builds it; the tests there hold
-            // it to the ids-only contract, and its doc states which legs of the
-            // send-id-to-report-id identity are enforced and where.
+            // it to the ids-only contract, and its doc states why the id it
+            // prints is the daemon's and not the one the send line printed.
             Effect::TurnFinished {
                 conversation_id,
                 request_id,
@@ -1631,11 +1631,13 @@ impl Engine {
             client_context,
             idempotency_key,
             // A fresh per-turn correlation id (trace propagation): the browser
-            // is the top of the turn, so it mints one uuid per send here — the
-            // same value the daemon adopts as the `request_id` it stamps on
-            // every streamed event, so one id threads through the browser's own
-            // log, the BFF and the daemon. Minted per call (never reused across
-            // sends), so two turns never merge into one trace.
+            // is the top of the turn, so it mints one uuid per send here. The
+            // BFF does NOT pass it on as the daemon's `turn_id` — one shared
+            // daemon connection carries every browser session, and a
+            // browser-chosen id lets two sessions collide on one stream, so the
+            // BFF mints its own and keeps this one as the trace the turn joins
+            // (`crates/server/src/forward.rs`). Minted per call (never reused
+            // across sends), so two turns never merge into one trace.
             turn_id: Some(uuid::Uuid::new_v4().to_string()),
             // The SPA has no trace of its own to continue — it is where a trace
             // starts, not a caller already inside one — so it never sets this;
@@ -1671,15 +1673,18 @@ impl Engine {
             system_refinement,
             idempotency_key,
         );
-        // Print the turn id to the browser console (in the browser) or stdout
-        // (in a host test) so a person can read it off the page and paste it
-        // into a daemon log line or a trace backend.
+        // Open the turn's console pair: this line, and the one the turn's
+        // `Effect::TurnFinished` prints when it ends. The turn id names the
+        // trace; the key is what joins this line to that one.
         if let Command::SendMessage {
             turn_id: Some(ref turn_id),
             ..
         } = cmd
         {
-            leptos::logging::log!("Adele turn_id: {turn_id}");
+            leptos::logging::log!(
+                "{}",
+                crate::effects::send_report_line(turn_id, sent_key.as_deref())
+            );
         }
         let tx = self.ui_tx.clone();
         spawn_local(async move {
@@ -2338,34 +2343,6 @@ mod tests {
                 let id = turn_id.expect("build_send_command must mint a turn_id");
                 let parsed = uuid::Uuid::parse_str(&id).expect("turn_id must be a valid UUID");
                 assert!(!parsed.is_nil(), "turn_id must not be the nil UUID");
-            }
-            other => panic!("expected SendMessage, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_minted_turn_id_is_already_in_the_daemons_canonical_spelling() {
-        // The daemon adopts a supplied turn id by re-spelling it canonically
-        // (`adopt_or_mint_turn_id` returns `parsed.to_string()`), so a mint in
-        // any other spelling — the 32-digit simple form, upper case, braced —
-        // would be adopted as a DIFFERENT string. The id printed at send time
-        // would then not match the one the turn report prints back, and a
-        // person greping the console for their turn would find only half of it.
-        let owner = Owner::new();
-        owner.set();
-        let (engine, _view) = engine_and_view();
-        match engine.build_send_command("c1".to_string(), "hi".to_string(), None, None) {
-            Command::SendMessage { turn_id, .. } => {
-                let id = turn_id.expect("build_send_command must mint a turn_id");
-                let canonical = uuid::Uuid::parse_str(&id)
-                    .expect("turn_id must be a valid UUID")
-                    .to_string();
-                assert_eq!(
-                    id, canonical,
-                    "the minted turn id must already be spelled the way the daemon \
-                     will spell it back, or the send and the turn report name \
-                     different ids"
-                );
             }
             other => panic!("expected SendMessage, got {other:?}"),
         }

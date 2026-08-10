@@ -35,23 +35,21 @@ pub enum Disposition {
 /// backgrounded conversation's turn too, which is the case the SPA could not
 /// see at all before.
 ///
-/// This is the close of the correlation the send path opens. Without it a
+/// This is the close of the pair [`send_report_line`] opens. Without it a
 /// person sees every turn start and no turn end.
 ///
-/// The field is printed as `turn_id` because that is what the send line calls
-/// it, and the two are meant to be the same value. That identity is a CONTRACT
-/// ACROSS THREE REPOSITORIES, and no test in this one proves it end to end.
-/// Each leg is held separately: `build_send_command` mints a non-nil v4 uuid
-/// (`send_command_carries_a_turn_id`) already in the spelling the daemon will
-/// spell back (`a_minted_turn_id_is_already_in_the_daemons_canonical_spelling`),
-/// the daemon adopts a
-/// supplied turn id as the turn's `request_id` rather than minting its own
-/// (`desktop-assistant`'s `adopt_or_mint_turn_id`, and only for a value that
-/// parses as a non-nil uuid), and the reducer reports the `request_id` it
-/// routed the stream under (`client-ui-common`#51). So the two ids match while
-/// all three hold, and a person who greps one and finds nothing should suspect
-/// the middle leg first. Nothing here breaks if they ever diverge: the line
-/// still reports the daemon's own id for the turn.
+/// `request_id` is the DAEMON's id for the turn, and it is deliberately not the
+/// `turn_id` the browser minted for the same send. The BFF mints its own
+/// correlation id for the daemon rather than passing the browser's through,
+/// because one shared daemon connection carries every browser session and a
+/// browser-chosen id lets two sessions collide on one stream (`forward.rs`).
+/// The browser's id crosses as the trace instead. So the two lines carry
+/// different ids on purpose, and the value that joins them is the
+/// `idempotency_key`, which this SPA minted and the ack echoed back
+/// (`a_send_and_its_turn_report_are_joined_by_the_idempotency_key`).
+///
+/// Do not relabel this field `turn_id` to make the pair look symmetrical. Two
+/// different ids under one name is the error that reads as correct.
 ///
 /// It carries ids only. [`TurnOutcome::Failed`](client_ui_common::TurnOutcome)
 /// holds daemon- or provider-supplied text that upstream documents as untrusted
@@ -82,10 +80,30 @@ pub fn turn_report_line(
         client_ui_common::TurnOutcome::Failed(_) => "failed",
     };
     format!(
-        "Adele turn finished: turn_id={} conversation={} idempotency_key={} outcome={outcome}",
+        "Adele turn finished: request_id={} conversation={} idempotency_key={} outcome={outcome}",
         or_dash(request_id),
         or_dash(conversation_id),
         or_dash(idempotency_key.unwrap_or_default()),
+    )
+}
+
+/// The one-line console report for a turn this SPA is starting.
+///
+/// The other half of the pair [`turn_report_line`] closes. `turn_id` is the id
+/// the browser mints for this send. The daemon does not stamp the turn with it:
+/// the BFF keeps it as the trace the turn belongs to and mints its own
+/// correlation id for the daemon (`forward.rs`), so the finished line reports a
+/// different id. `idempotency_key` is what joins the two lines, so it is on both
+/// or the pair cannot be read.
+///
+/// Ids only, for the same reason as the finished line: the prompt is content and
+/// never reaches a console line.
+pub fn send_report_line(turn_id: &str, idempotency_key: Option<&str>) -> String {
+    let key = idempotency_key.unwrap_or_default();
+    format!(
+        "Adele turn started: turn_id={} idempotency_key={}",
+        if turn_id.is_empty() { "-" } else { turn_id },
+        if key.is_empty() { "-" } else { key },
     )
 }
 
@@ -316,8 +334,54 @@ pub mod census {
 #[cfg(test)]
 mod tests {
     use super::census::{VARIANT_COUNT, every_variant, ordinal};
-    use super::turn_report_line;
+    use super::{send_report_line, turn_report_line};
     use client_ui_common::TurnOutcome;
+
+    /// The join between the two console lines a turn produces. A person reads
+    /// the started line, then the finished line, and this is the value that says
+    /// the two are the same turn.
+    const KEY: &str = "send-key-9";
+
+    #[test]
+    fn a_started_turn_is_reported_with_its_turn_id_and_key() {
+        let line = send_report_line("11111111-2222-4333-8444-555555555555", Some(KEY));
+        for id in ["11111111-2222-4333-8444-555555555555", KEY] {
+            assert!(
+                line.contains(id),
+                "the started line must carry {id:?}: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_send_and_its_turn_report_are_joined_by_the_idempotency_key() {
+        // The browser's `turn_id` is NOT the daemon's `request_id` - the BFF
+        // mints its own correlation id and keeps the browser's as the trace
+        // root - so the two lines cannot be joined by turn id. The key is the
+        // one value that appears on both, and it only works because the ack
+        // echoes it back. Losing it would leave a person unable to tell which
+        // finished line belongs to which send.
+        let started = send_report_line("11111111-2222-4333-8444-555555555555", Some(KEY));
+        let finished = turn_report_line(
+            "conv-1",
+            "99999999-8888-4777-8666-555555555555",
+            Some(KEY),
+            &TurnOutcome::Completed,
+        );
+        assert!(
+            started.contains(KEY) && finished.contains(KEY),
+            "both lines must carry the key that joins them: {started:?} / {finished:?}"
+        );
+    }
+
+    #[test]
+    fn a_keyless_send_is_reported_with_no_key() {
+        let line = send_report_line("11111111-2222-4333-8444-555555555555", None);
+        assert!(
+            line.contains("11111111-2222-4333-8444-555555555555"),
+            "a keyless send is still reported by its turn id: {line:?}"
+        );
+    }
 
     // --- The finished-turn report (client-ui-common#51) ----------------------
     // The SPA logs one line per send ("Adele turn_id: …") and needs the matching
@@ -377,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn a_keyless_send_reports_a_turn_with_no_key() {
+    fn a_keyless_finished_turn_is_reported_with_no_key() {
         // A keyless send, and an external turn this client never sent, both
         // arrive with `idempotency_key: None`. The report still names the turn.
         let line = turn_report_line(
