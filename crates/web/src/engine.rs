@@ -798,8 +798,8 @@ impl Engine {
             // has already finalized the reply or cleared the stream before it
             // reports — so the whole arm is the console line.
             // `crate::effects::turn_report_line` builds it; the tests there hold
-            // it to the ids-only contract, and its doc states why the id it
-            // prints is the daemon's and not the one the send line printed.
+            // it to the ids-only contract, and its doc traces how the id it
+            // prints gets back here as the one the send line printed.
             Effect::TurnFinished {
                 conversation_id,
                 request_id,
@@ -1632,10 +1632,12 @@ impl Engine {
             idempotency_key,
             // A fresh per-turn correlation id (trace propagation): the browser
             // is the top of the turn, so it mints one uuid per send here. The
-            // BFF does NOT pass it on as the daemon's `turn_id` — one shared
-            // daemon connection carries every browser session, and a
-            // browser-chosen id lets two sessions collide on one stream, so the
-            // BFF mints its own and keeps this one as the trace the turn joins
+            // BFF's front door adopts it as this turn's `request_id`, and every
+            // event it sends back carries that id — so this is the value the
+            // turn report prints when the turn ends. It is NOT what the BFF
+            // sends the daemon: one shared daemon connection carries every
+            // browser session, so the BFF mints a separate daemon-facing id and
+            // rewrites the events back to this one
             // (`crates/server/src/forward.rs`). Minted per call (never reused
             // across sends), so two turns never merge into one trace.
             turn_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -1664,8 +1666,8 @@ impl Engine {
             ));
             return;
         };
-        // The ack echoes this key back to the reducer (below), so keep a copy
-        // before the command consumes it.
+        // The reducer needs this key back when the ack lands (below), so keep a
+        // copy before the command consumes it.
         let sent_key = idempotency_key.clone();
         let cmd = self.build_send_command(
             conversation_id.clone(),
@@ -1674,8 +1676,9 @@ impl Engine {
             idempotency_key,
         );
         // Open the turn's console pair: this line, and the one the turn's
-        // `Effect::TurnFinished` prints when it ends. The turn id names the
-        // trace; the key is what joins this line to that one.
+        // `Effect::TurnFinished` prints when it ends. Both carry the turn id and
+        // the key, so the pair reads even when a teardown ends the turn before
+        // any id arrives.
         if let Command::SendMessage {
             turn_id: Some(ref turn_id),
             ..
@@ -1696,8 +1699,10 @@ impl Engine {
                     let _ = tx.unbounded_send(UiMessage::PromptSent {
                         task_id,
                         conversation_id,
-                        // The key of the send this ack answers, echoed back
-                        // unchanged (client-ui-common#51). Only the executor
+                        // The key of the send this ack answers
+                        // (client-ui-common#51). It is this task's own retained
+                        // copy, not a value read off the ack — the daemon does
+                        // not return it on `SendMessageAck`. Only the executor
                         // knows the pairing: sends overlap and each runs on its
                         // own task, so acks need not return in send order, and
                         // anything the reducer parked would have to guess.
@@ -2343,6 +2348,35 @@ mod tests {
                 let id = turn_id.expect("build_send_command must mint a turn_id");
                 let parsed = uuid::Uuid::parse_str(&id).expect("turn_id must be a valid UUID");
                 assert!(!parsed.is_nil(), "turn_id must not be the nil UUID");
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_minted_turn_id_survives_the_front_doors_respelling() {
+        // The BFF's front door adopts this id as the turn's `request_id` by
+        // parsing it and re-spelling it canonically (`adopt_or_mint_turn_id`),
+        // and that re-spelled value is what comes back on every event and ends
+        // up on the finished console line. A mint in any other spelling - the
+        // 32-digit simple form, upper case, braced - would come back spelled
+        // differently from the one the send line printed, and a person greping
+        // their turn id would find only half the turn.
+        let owner = Owner::new();
+        owner.set();
+        let (engine, _view) = engine_and_view();
+        match engine.build_send_command("c1".to_string(), "hi".to_string(), None, None) {
+            Command::SendMessage { turn_id, .. } => {
+                let id = turn_id.expect("build_send_command must mint a turn_id");
+                let respelled = uuid::Uuid::parse_str(&id)
+                    .expect("turn_id must be a valid UUID")
+                    .to_string();
+                assert_eq!(
+                    id, respelled,
+                    "the minted turn id must already be spelled the way the front \
+                     door will spell it back, or the send line and the turn report \
+                     name different ids"
+                );
             }
             other => panic!("expected SendMessage, got {other:?}"),
         }

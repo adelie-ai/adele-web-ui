@@ -38,18 +38,31 @@ pub enum Disposition {
 /// This is the close of the pair [`send_report_line`] opens. Without it a
 /// person sees every turn start and no turn end.
 ///
-/// `request_id` is the DAEMON's id for the turn, and it is deliberately not the
-/// `turn_id` the browser minted for the same send. The BFF mints its own
-/// correlation id for the daemon rather than passing the browser's through,
-/// because one shared daemon connection carries every browser session and a
-/// browser-chosen id lets two sessions collide on one stream (`forward.rs`).
-/// The browser's id crosses as the trace instead. So the two lines carry
-/// different ids on purpose, and the value that joins them is the
-/// `idempotency_key`, which this SPA minted and the ack echoed back
-/// (`a_send_and_its_turn_report_are_joined_by_the_idempotency_key`).
+/// The id prints as `turn_id`, the same name the started line gives it, because
+/// for a turn this SPA sent the two really are one value. The path is not
+/// obvious, so it is written down here.
 ///
-/// Do not relabel this field `turn_id` to make the pair look symmetrical. Two
-/// different ids under one name is the error that reads as correct.
+/// The browser mints the id and sends it. The BFF's embedded front door adopts
+/// it as this turn's `request_id` (`adopt_or_mint_turn_id`, which keeps a
+/// parseable non-nil uuid and re-spells it canonically). The BFF then mints a
+/// SEPARATE id for the real daemon, because one shared daemon connection
+/// carries every browser session and a browser-chosen id lets two sessions
+/// collide on one stream - and rewrites the id on every event it sends back to
+/// the browser's own (`forward.rs`, `project_turn_event`). So the daemon's id
+/// never reaches this SPA, and what the reducer reports here is the id the send
+/// line printed.
+///
+/// TWO OF THOSE THREE LEGS ARE IN OTHER CRATES, and no test in this one drives
+/// the whole path. Held separately: this SPA mints a non-nil v4 uuid already in
+/// the spelling the front door will spell back
+/// (`send_command_carries_a_turn_id`,
+/// `a_minted_turn_id_survives_the_front_doors_respelling`); the BFF's rewrite is
+/// held by `forward.rs`'s own tests; the reducer reports the `request_id` it
+/// routed the stream under (`client-ui-common`#51).
+///
+/// The `idempotency_key` is the second join, and the only one left when the id
+/// is absent - a teardown can end a turn before any id arrives
+/// (`a_send_and_its_turn_report_are_joined_by_the_idempotency_key`).
 ///
 /// It carries ids only. [`TurnOutcome::Failed`](client_ui_common::TurnOutcome)
 /// holds daemon- or provider-supplied text that upstream documents as untrusted
@@ -80,7 +93,7 @@ pub fn turn_report_line(
         client_ui_common::TurnOutcome::Failed(_) => "failed",
     };
     format!(
-        "Adele turn finished: request_id={} conversation={} idempotency_key={} outcome={outcome}",
+        "Adele turn finished: turn_id={} conversation={} idempotency_key={} outcome={outcome}",
         or_dash(request_id),
         or_dash(conversation_id),
         or_dash(idempotency_key.unwrap_or_default()),
@@ -90,11 +103,10 @@ pub fn turn_report_line(
 /// The one-line console report for a turn this SPA is starting.
 ///
 /// The other half of the pair [`turn_report_line`] closes. `turn_id` is the id
-/// the browser mints for this send. The daemon does not stamp the turn with it:
-/// the BFF keeps it as the trace the turn belongs to and mints its own
-/// correlation id for the daemon (`forward.rs`), so the finished line reports a
-/// different id. `idempotency_key` is what joins the two lines, so it is on both
-/// or the pair cannot be read.
+/// the browser mints for this send, and the finished line prints it back under
+/// the same name - see that function for why, and for which legs of that
+/// identity are actually held. `idempotency_key` is the second join, and it is
+/// on both lines so the pair still reads when no id arrives.
 ///
 /// Ids only, for the same reason as the finished line: the prompt is content and
 /// never reaches a console line.
@@ -355,19 +367,13 @@ mod tests {
 
     #[test]
     fn a_send_and_its_turn_report_are_joined_by_the_idempotency_key() {
-        // The browser's `turn_id` is NOT the daemon's `request_id` - the BFF
-        // mints its own correlation id and keeps the browser's as the trace
-        // root - so the two lines cannot be joined by turn id. The key is the
-        // one value that appears on both, and it only works because the ack
-        // echoes it back. Losing it would leave a person unable to tell which
-        // finished line belongs to which send.
+        // The turn id joins the pair for a normal turn. The key is the join
+        // that survives when no id arrives: a teardown ends a turn before the
+        // id does, and the finished line then carries an empty one. That is the
+        // case driven here, so the test fails if either line stops carrying the
+        // key rather than passing on the id alone.
         let started = send_report_line("11111111-2222-4333-8444-555555555555", Some(KEY));
-        let finished = turn_report_line(
-            "conv-1",
-            "99999999-8888-4777-8666-555555555555",
-            Some(KEY),
-            &TurnOutcome::Completed,
-        );
+        let finished = turn_report_line("conv-1", "", Some(KEY), &TurnOutcome::Completed);
         assert!(
             started.contains(KEY) && finished.contains(KEY),
             "both lines must carry the key that joins them: {started:?} / {finished:?}"
@@ -381,11 +387,17 @@ mod tests {
             line.contains("11111111-2222-4333-8444-555555555555"),
             "a keyless send is still reported by its turn id: {line:?}"
         );
+        assert!(
+            line.contains("idempotency_key=-"),
+            "a keyless send must show the key as absent, not carry some other \
+             value in that field: {line:?}"
+        );
     }
 
     // --- The finished-turn report (client-ui-common#51) ----------------------
-    // The SPA logs one line per send ("Adele turn_id: …") and needs the matching
-    // close line, or the browser console shows a turn that starts and never ends.
+    // The SPA logs one line per send ("Adele turn started: …") and needs the
+    // matching close line, or the browser console shows a turn that starts and
+    // never ends.
 
     #[test]
     fn a_finished_turn_is_reported_with_its_correlation_ids() {
@@ -453,6 +465,11 @@ mod tests {
         assert!(
             line.contains("11111111-2222-4333-8444-555555555555"),
             "a keyless turn is still reported by its turn id: {line:?}"
+        );
+        assert!(
+            line.contains("idempotency_key=-"),
+            "a keyless turn must show the key as absent, not carry some other \
+             value in that field: {line:?}"
         );
     }
 
