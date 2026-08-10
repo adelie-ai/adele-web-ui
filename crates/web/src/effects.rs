@@ -35,14 +35,14 @@ pub mod census {
     //! compile here; [`VARIANT_COUNT`] then makes the omission of its *sample*
     //! a test failure rather than a quiet coverage hole.
 
-    use client_ui_common::{AdeleOutput, ContextUsageView, Effect, SelectedModel};
+    use client_ui_common::{AdeleOutput, ContextUsageView, Effect, SelectedModel, TurnOutcome};
     use desktop_assistant_api_model as api;
     use desktop_assistant_api_model::client::{
         ConversationDetail, ConversationSummary, MessageKind,
     };
 
     /// How many variants [`Effect`] has. Bump it when `ordinal` gains an arm.
-    pub const VARIANT_COUNT: usize = 37;
+    pub const VARIANT_COUNT: usize = 38;
 
     /// A stable index per [`Effect`] variant, used only to prove
     /// [`every_variant`] covers them all.
@@ -85,6 +85,7 @@ pub mod census {
             Effect::AddLocalMessage { .. } => 34,
             Effect::SetAdeleOutputDropdown(_) => 35,
             Effect::SubmitClientToolResult { .. } => 36,
+            Effect::TurnFinished { .. } => 37,
         }
     }
 
@@ -161,6 +162,12 @@ pub mod census {
                 task_id: "t1".to_string(),
                 tool_call_id: "call-1".to_string(),
                 result: Ok("spoken".to_string()),
+            },
+            Effect::TurnFinished {
+                conversation_id: "c1".to_string(),
+                request_id: "11111111-2222-4333-8444-555555555555".to_string(),
+                idempotency_key: Some("send-key-1".to_string()),
+                outcome: TurnOutcome::Completed,
             },
         ]
     }
@@ -246,6 +253,93 @@ pub mod census {
 #[cfg(test)]
 mod tests {
     use super::census::{VARIANT_COUNT, every_variant, ordinal};
+    use super::turn_report_line;
+    use client_ui_common::TurnOutcome;
+
+    // --- The finished-turn report (client-ui-common#51) ----------------------
+    // The SPA logs one line per send ("Adele turn_id: …") and needs the matching
+    // close line, or the browser console shows a turn that starts and never ends.
+
+    #[test]
+    fn a_finished_turn_is_reported_with_its_correlation_ids() {
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            Some("send-key-9"),
+            &TurnOutcome::Completed,
+        );
+        for id in [
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            "send-key-9",
+        ] {
+            assert!(
+                line.contains(id),
+                "the turn report must carry {id:?} so a person can pair it with the \
+                 send line and with the daemon's log: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_is_reported_as_failed() {
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            None,
+            &TurnOutcome::Failed("the provider refused".to_string()),
+        );
+        assert!(
+            line.contains("failed"),
+            "a failed turn must say so, or the console shows every turn as a success: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_report_omits_the_failure_text() {
+        // `TurnOutcome::Failed` carries daemon- or provider-supplied text that
+        // upstream documents as untrusted for telemetry: a refusal can quote the
+        // words it refused. The report carries ids only, so the fact of failure
+        // reaches the console and the content does not.
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            None,
+            &TurnOutcome::Failed("blocked: my bank account number is 12345".to_string()),
+        );
+        assert!(
+            !line.contains("bank account"),
+            "the failure text must stay off the report: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_keyless_send_reports_a_turn_with_no_key() {
+        // A keyless send, and an external turn this client never sent, both
+        // arrive with `idempotency_key: None`. The report still names the turn.
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            None,
+            &TurnOutcome::Completed,
+        );
+        assert!(
+            line.contains("11111111-2222-4333-8444-555555555555"),
+            "a keyless turn is still reported by its turn id: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ended_before_its_id_arrived_is_still_reported() {
+        // A teardown (a dropped socket, a deleted conversation) ends a turn
+        // before the daemon's id ever reaches the client, so `request_id` is
+        // empty. The line must still name the conversation.
+        let line = turn_report_line("conv-1", "", Some("send-key-9"), &TurnOutcome::Completed);
+        assert!(
+            line.contains("conv-1") && line.contains("send-key-9"),
+            "an id-less end still reports the conversation and the send it closes: {line:?}"
+        );
+    }
 
     #[test]
     fn effect_census_covers_every_variant_exactly_once() {

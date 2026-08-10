@@ -2539,6 +2539,26 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_turn_is_reported_rather_than_dropped() {
+        // The SPA logs a `turn_id` for every send. Dropping the turn's end would
+        // leave that line unmatched in the console, which is the behaviour gap a
+        // catch-all arm would hide (client-ui-common#51).
+        let owner = Owner::new();
+        owner.set();
+        let (mut engine, _view) = engine_and_view();
+        assert_eq!(
+            engine.run_effect(Effect::TurnFinished {
+                conversation_id: "c1".to_string(),
+                request_id: "11111111-2222-4333-8444-555555555555".to_string(),
+                idempotency_key: Some("send-key-1".to_string()),
+                outcome: client_ui_common::TurnOutcome::Completed,
+            }),
+            Disposition::Handled,
+            "a finished turn must be reported, not dropped"
+        );
+    }
+
+    #[test]
     fn task_completion_is_handled_once_the_tasks_panel_has_loaded() {
         // The one conditional disposition: a completion is re-fetched only after
         // the panel has been opened, and is a stated no-op before that.
