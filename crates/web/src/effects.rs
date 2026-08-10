@@ -26,6 +26,99 @@ pub enum Disposition {
     Ignored(&'static str),
 }
 
+/// The one-line console report for a turn that ended
+/// ([`Effect::TurnFinished`](client_ui_common::Effect::TurnFinished)).
+///
+/// The reducer reports a turn wherever it drops, clears or replaces a stream:
+/// the reply completes, the turn fails, the socket drops, the conversation is
+/// deleted, or a later ack replaces a turn still in flight. It reports a
+/// backgrounded conversation's turn too, which is the case the SPA could not
+/// see at all before.
+///
+/// This is the close of the pair [`send_report_line`] opens. Without it a
+/// person sees every turn start and no turn end.
+///
+/// The id prints as `turn_id`, the same name the started line gives it, because
+/// for a turn this SPA sent the two really are one value. The path is not
+/// obvious, so it is written down here.
+///
+/// The browser mints the id and sends it. The BFF's embedded front door adopts
+/// it as this turn's `request_id` (`adopt_or_mint_turn_id`, which keeps a
+/// parseable non-nil uuid and re-spells it canonically). The BFF then mints a
+/// SEPARATE id for the real daemon, because one shared daemon connection
+/// carries every browser session and a browser-chosen id lets two sessions
+/// collide on one stream - and rewrites the id on every event it sends back to
+/// the browser's own (`forward.rs`, `project_turn_event`). So the daemon's id
+/// never reaches this SPA, and what the reducer reports here is the id the send
+/// line printed.
+///
+/// TWO OF THOSE THREE LEGS ARE IN OTHER CRATES, and no test in this one drives
+/// the whole path. Held separately: this SPA mints a non-nil v4 uuid already in
+/// the spelling the front door will spell back
+/// (`send_command_carries_a_turn_id`,
+/// `a_minted_turn_id_survives_the_front_doors_respelling`); the BFF's rewrite is
+/// held by `forward.rs`'s own tests; the reducer reports the `request_id` it
+/// routed the stream under (`client-ui-common`#51).
+///
+/// The `idempotency_key` is the second join, and the only one left when the id
+/// is absent - a teardown can end a turn before any id arrives
+/// (`a_send_and_its_turn_report_are_joined_by_the_idempotency_key`).
+///
+/// It carries ids only. [`TurnOutcome::Failed`](client_ui_common::TurnOutcome)
+/// holds daemon- or provider-supplied text that upstream documents as untrusted
+/// for telemetry — a content refusal can quote the words it refused — so the
+/// outcome reaches the line as `completed` or `failed` and the text does not.
+/// The user-facing message is the reducer's own `SetStatusText`, which the
+/// status line already renders.
+///
+/// A missing value prints `-`: `request_id` is empty when a teardown ended the
+/// turn before the daemon's id arrived, and `idempotency_key` is `None` for a
+/// keyless send and for an external turn (voice, another client) this SPA never
+/// sent.
+///
+/// Pure, and separate from the executor arm, because the executor needs live
+/// signals and a browser console; this is what the tests below can hold to the
+/// content contract.
+pub fn turn_report_line(
+    conversation_id: &str,
+    request_id: &str,
+    idempotency_key: Option<&str>,
+    outcome: &client_ui_common::TurnOutcome,
+) -> String {
+    fn or_dash(value: &str) -> &str {
+        if value.is_empty() { "-" } else { value }
+    }
+    let outcome = match outcome {
+        client_ui_common::TurnOutcome::Completed => "completed",
+        client_ui_common::TurnOutcome::Failed(_) => "failed",
+    };
+    format!(
+        "Adele turn finished: turn_id={} conversation={} idempotency_key={} outcome={outcome}",
+        or_dash(request_id),
+        or_dash(conversation_id),
+        or_dash(idempotency_key.unwrap_or_default()),
+    )
+}
+
+/// The one-line console report for a turn this SPA is starting.
+///
+/// The other half of the pair [`turn_report_line`] closes. `turn_id` is the id
+/// the browser mints for this send, and the finished line prints it back under
+/// the same name - see that function for why, and for which legs of that
+/// identity are actually held. `idempotency_key` is the second join, and it is
+/// on both lines so the pair still reads when no id arrives.
+///
+/// Ids only, for the same reason as the finished line: the prompt is content and
+/// never reaches a console line.
+pub fn send_report_line(turn_id: &str, idempotency_key: Option<&str>) -> String {
+    let key = idempotency_key.unwrap_or_default();
+    format!(
+        "Adele turn started: turn_id={} idempotency_key={}",
+        if turn_id.is_empty() { "-" } else { turn_id },
+        if key.is_empty() { "-" } else { key },
+    )
+}
+
 #[cfg(test)]
 pub mod census {
     //! One sample of every [`Effect`] variant, and the ordinal census that keeps
@@ -35,14 +128,14 @@ pub mod census {
     //! compile here; [`VARIANT_COUNT`] then makes the omission of its *sample*
     //! a test failure rather than a quiet coverage hole.
 
-    use client_ui_common::{AdeleOutput, ContextUsageView, Effect, SelectedModel};
+    use client_ui_common::{AdeleOutput, ContextUsageView, Effect, SelectedModel, TurnOutcome};
     use desktop_assistant_api_model as api;
     use desktop_assistant_api_model::client::{
         ConversationDetail, ConversationSummary, MessageKind,
     };
 
     /// How many variants [`Effect`] has. Bump it when `ordinal` gains an arm.
-    pub const VARIANT_COUNT: usize = 37;
+    pub const VARIANT_COUNT: usize = 38;
 
     /// A stable index per [`Effect`] variant, used only to prove
     /// [`every_variant`] covers them all.
@@ -85,6 +178,7 @@ pub mod census {
             Effect::AddLocalMessage { .. } => 34,
             Effect::SetAdeleOutputDropdown(_) => 35,
             Effect::SubmitClientToolResult { .. } => 36,
+            Effect::TurnFinished { .. } => 37,
         }
     }
 
@@ -161,6 +255,12 @@ pub mod census {
                 task_id: "t1".to_string(),
                 tool_call_id: "call-1".to_string(),
                 result: Ok("spoken".to_string()),
+            },
+            Effect::TurnFinished {
+                conversation_id: "c1".to_string(),
+                request_id: "11111111-2222-4333-8444-555555555555".to_string(),
+                idempotency_key: Some("send-key-1".to_string()),
+                outcome: TurnOutcome::Completed,
             },
         ]
     }
@@ -246,6 +346,144 @@ pub mod census {
 #[cfg(test)]
 mod tests {
     use super::census::{VARIANT_COUNT, every_variant, ordinal};
+    use super::{send_report_line, turn_report_line};
+    use client_ui_common::TurnOutcome;
+
+    /// The join between the two console lines a turn produces. A person reads
+    /// the started line, then the finished line, and this is the value that says
+    /// the two are the same turn.
+    const KEY: &str = "send-key-9";
+
+    #[test]
+    fn a_started_turn_is_reported_with_its_turn_id_and_key() {
+        let line = send_report_line("11111111-2222-4333-8444-555555555555", Some(KEY));
+        for id in ["11111111-2222-4333-8444-555555555555", KEY] {
+            assert!(
+                line.contains(id),
+                "the started line must carry {id:?}: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_send_and_its_turn_report_are_joined_by_the_idempotency_key() {
+        // The turn id joins the pair for a normal turn. The key is the join
+        // that survives when no id arrives: a teardown ends a turn before the
+        // id does, and the finished line then carries an empty one. That is the
+        // case driven here, so the test fails if either line stops carrying the
+        // key rather than passing on the id alone.
+        let started = send_report_line("11111111-2222-4333-8444-555555555555", Some(KEY));
+        let finished = turn_report_line("conv-1", "", Some(KEY), &TurnOutcome::Completed);
+        assert!(
+            started.contains(KEY) && finished.contains(KEY),
+            "both lines must carry the key that joins them: {started:?} / {finished:?}"
+        );
+    }
+
+    #[test]
+    fn a_keyless_send_is_reported_with_no_key() {
+        let line = send_report_line("11111111-2222-4333-8444-555555555555", None);
+        assert!(
+            line.contains("11111111-2222-4333-8444-555555555555"),
+            "a keyless send is still reported by its turn id: {line:?}"
+        );
+        assert!(
+            line.contains("idempotency_key=-"),
+            "a keyless send must show the key as absent, not carry some other \
+             value in that field: {line:?}"
+        );
+    }
+
+    // --- The finished-turn report (client-ui-common#51) ----------------------
+    // The SPA logs one line per send ("Adele turn started: …") and needs the
+    // matching close line, or the browser console shows a turn that starts and
+    // never ends.
+
+    #[test]
+    fn a_finished_turn_is_reported_with_its_correlation_ids() {
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            Some("send-key-9"),
+            &TurnOutcome::Completed,
+        );
+        for id in [
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            "send-key-9",
+        ] {
+            assert!(
+                line.contains(id),
+                "the turn report must carry {id:?} so a person can pair it with the \
+                 send line and with the daemon's log: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_is_reported_as_failed() {
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            None,
+            &TurnOutcome::Failed("the provider refused".to_string()),
+        );
+        assert!(
+            line.contains("failed"),
+            "a failed turn must say so, or the console shows every turn as a success: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_report_omits_the_failure_text() {
+        // `TurnOutcome::Failed` carries daemon- or provider-supplied text that
+        // upstream documents as untrusted for telemetry: a refusal can quote the
+        // words it refused. The report carries ids only, so the fact of failure
+        // reaches the console and the content does not.
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            None,
+            &TurnOutcome::Failed("blocked: my bank account number is 12345".to_string()),
+        );
+        assert!(
+            !line.contains("bank account"),
+            "the failure text must stay off the report: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_keyless_finished_turn_is_reported_with_no_key() {
+        // A keyless send, and an external turn this client never sent, both
+        // arrive with `idempotency_key: None`. The report still names the turn.
+        let line = turn_report_line(
+            "conv-1",
+            "11111111-2222-4333-8444-555555555555",
+            None,
+            &TurnOutcome::Completed,
+        );
+        assert!(
+            line.contains("11111111-2222-4333-8444-555555555555"),
+            "a keyless turn is still reported by its turn id: {line:?}"
+        );
+        assert!(
+            line.contains("idempotency_key=-"),
+            "a keyless turn must show the key as absent, not carry some other \
+             value in that field: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ended_before_its_id_arrived_is_still_reported() {
+        // A teardown (a dropped socket, a deleted conversation) ends a turn
+        // before the daemon's id ever reaches the client, so `request_id` is
+        // empty. The line must still name the conversation.
+        let line = turn_report_line("conv-1", "", Some("send-key-9"), &TurnOutcome::Completed);
+        assert!(
+            line.contains("conv-1") && line.contains("send-key-9"),
+            "an id-less end still reports the conversation and the send it closes: {line:?}"
+        );
+    }
 
     #[test]
     fn effect_census_covers_every_variant_exactly_once() {
