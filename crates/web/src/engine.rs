@@ -2344,6 +2344,34 @@ mod tests {
     }
 
     #[test]
+    fn a_minted_turn_id_is_already_in_the_daemons_canonical_spelling() {
+        // The daemon adopts a supplied turn id by re-spelling it canonically
+        // (`adopt_or_mint_turn_id` returns `parsed.to_string()`), so a mint in
+        // any other spelling — the 32-digit simple form, upper case, braced —
+        // would be adopted as a DIFFERENT string. The id printed at send time
+        // would then not match the one the turn report prints back, and a
+        // person greping the console for their turn would find only half of it.
+        let owner = Owner::new();
+        owner.set();
+        let (engine, _view) = engine_and_view();
+        match engine.build_send_command("c1".to_string(), "hi".to_string(), None, None) {
+            Command::SendMessage { turn_id, .. } => {
+                let id = turn_id.expect("build_send_command must mint a turn_id");
+                let canonical = uuid::Uuid::parse_str(&id)
+                    .expect("turn_id must be a valid UUID")
+                    .to_string();
+                assert_eq!(
+                    id, canonical,
+                    "the minted turn id must already be spelled the way the daemon \
+                     will spell it back, or the send and the turn report name \
+                     different ids"
+                );
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn two_turns_get_different_turn_ids() {
         // Minting is per turn, not per session or per engine: two independent
         // sends sharing a turn_id would merge two distinct traces into one.

@@ -41,8 +41,10 @@ pub enum Disposition {
 /// The field is printed as `turn_id` because that is what the send line calls
 /// it, and the two are meant to be the same value. That identity is a CONTRACT
 /// ACROSS THREE REPOSITORIES, and no test in this one proves it end to end.
-/// Each leg is held separately: `build_send_command` mints a canonical
-/// non-nil v4 uuid (`send_command_carries_a_turn_id`), the daemon adopts a
+/// Each leg is held separately: `build_send_command` mints a non-nil v4 uuid
+/// (`send_command_carries_a_turn_id`) already in the spelling the daemon will
+/// spell back (`a_minted_turn_id_is_already_in_the_daemons_canonical_spelling`),
+/// the daemon adopts a
 /// supplied turn id as the turn's `request_id` rather than minting its own
 /// (`desktop-assistant`'s `adopt_or_mint_turn_id`, and only for a value that
 /// parses as a non-nil uuid), and the reducer reports the `request_id` it
