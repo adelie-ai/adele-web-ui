@@ -35,12 +35,21 @@ pub enum Disposition {
 /// backgrounded conversation's turn too, which is the case the SPA could not
 /// see at all before.
 ///
-/// This is the close of the correlation the send path opens. `spawn_send` mints
-/// a `turn_id` per send and prints it, the daemon adopts that value as the
-/// `request_id` it stamps on the turn's events, and it comes back here — so one
-/// id read off the browser console finds the same turn in the daemon's log or
-/// in a trace backend. Without this line a person sees every turn start and no
-/// turn end.
+/// This is the close of the correlation the send path opens. Without it a
+/// person sees every turn start and no turn end.
+///
+/// The field is printed as `turn_id` because that is what the send line calls
+/// it, and the two are meant to be the same value. That identity is a CONTRACT
+/// ACROSS THREE REPOSITORIES, and no test in this one proves it end to end.
+/// Each leg is held separately: `build_send_command` mints a canonical
+/// non-nil v4 uuid (`send_command_carries_a_turn_id`), the daemon adopts a
+/// supplied turn id as the turn's `request_id` rather than minting its own
+/// (`desktop-assistant`'s `adopt_or_mint_turn_id`, and only for a value that
+/// parses as a non-nil uuid), and the reducer reports the `request_id` it
+/// routed the stream under (`client-ui-common`#51). So the two ids match while
+/// all three hold, and a person who greps one and finds nothing should suspect
+/// the middle leg first. Nothing here breaks if they ever diverge: the line
+/// still reports the daemon's own id for the turn.
 ///
 /// It carries ids only. [`TurnOutcome::Failed`](client_ui_common::TurnOutcome)
 /// holds daemon- or provider-supplied text that upstream documents as untrusted

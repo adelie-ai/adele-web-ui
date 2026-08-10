@@ -793,13 +793,13 @@ impl Engine {
                 self.refresh_tasks()
             }
             // --- Turn-completion correlation (client-ui-common#51) ------------
-            // The close of the correlation `spawn_send` opens: it prints the
-            // `turn_id` it mints for every send, the daemon adopts that value as
-            // the turn's `request_id`, and it returns here when the turn ends.
-            // Nothing to draw — the reducer has already finalized the reply or
-            // cleared the stream before it reports — so the whole arm is the
-            // console line, which `crate::effects::turn_report_line` builds and
-            // the tests there hold to the ids-only contract.
+            // The close of the correlation `spawn_send` opens, which prints the
+            // `turn_id` it mints for every send. Nothing to draw — the reducer
+            // has already finalized the reply or cleared the stream before it
+            // reports — so the whole arm is the console line.
+            // `crate::effects::turn_report_line` builds it; the tests there hold
+            // it to the ids-only contract, and its doc states which legs of the
+            // send-id-to-report-id identity are enforced and where.
             Effect::TurnFinished {
                 conversation_id,
                 request_id,
