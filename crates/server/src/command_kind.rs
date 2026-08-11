@@ -89,6 +89,9 @@ pub fn command_kind(cmd: &api::Command) -> &'static str {
         api::Command::DeleteScratchpadNotes { .. } => "DeleteScratchpadNotes",
         api::Command::RegisterClientTools { .. } => "RegisterClientTools",
         api::Command::ClientToolResult { .. } => "ClientToolResult",
+        api::Command::ListNegativeMemories => "ListNegativeMemories",
+        api::Command::GetNegativeMemory { .. } => "GetNegativeMemory",
+        api::Command::ClearNegativeMemory { .. } => "ClearNegativeMemory",
     }
 }
 
