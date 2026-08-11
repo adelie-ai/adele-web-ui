@@ -40,8 +40,6 @@ pub fn command_kind(cmd: &api::Command) -> &'static str {
         api::Command::GetEmbeddingsSettings => "GetEmbeddingsSettings",
         api::Command::SetEmbeddingsSettings { .. } => "SetEmbeddingsSettings",
         api::Command::GetConnectorDefaults { .. } => "GetConnectorDefaults",
-        api::Command::GetPersistenceSettings => "GetPersistenceSettings",
-        api::Command::SetPersistenceSettings { .. } => "SetPersistenceSettings",
         api::Command::GetDatabaseSettings => "GetDatabaseSettings",
         api::Command::SetDatabaseSettings { .. } => "SetDatabaseSettings",
         api::Command::GetBackendTasksSettings => "GetBackendTasksSettings",
