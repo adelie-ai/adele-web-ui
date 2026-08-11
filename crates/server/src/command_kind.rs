@@ -65,6 +65,8 @@ pub fn command_kind(cmd: &api::Command) -> &'static str {
         api::Command::DeleteKnowledgeEntry { .. } => "DeleteKnowledgeEntry",
         api::Command::GetKnowledgeTrashCount => "GetKnowledgeTrashCount",
         api::Command::EmptyKnowledgeTrash => "EmptyKnowledgeTrash",
+        api::Command::ListSkills { .. } => "ListSkills",
+        api::Command::SetSkillApproval { .. } => "SetSkillApproval",
         api::Command::StartKnowledgeMaintenance { .. } => "StartKnowledgeMaintenance",
         api::Command::ListMcpServers => "ListMcpServers",
         api::Command::AddMcpServer { .. } => "AddMcpServer",
