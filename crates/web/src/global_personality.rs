@@ -78,7 +78,7 @@ pub fn row_options() -> Vec<(&'static str, &'static str)> {
 
 /// Map a complete global [`PersonalitySettingsView`] into a [`ConfigChanges`] that
 /// sets **all seven** personality traits (a full replace) and touches nothing
-/// else (embeddings / persistence stay `None`). This is the exact wire payload
+/// else (embeddings stays `None`). This is the exact wire payload
 /// `SetConfig` receives.
 pub fn changes_from(p: &PersonalitySettingsView) -> ConfigChanges {
     ConfigChanges {
@@ -366,17 +366,13 @@ mod tests {
     }
 
     #[test]
-    fn changes_from_touches_only_personality_not_embeddings_or_persistence() {
-        // A personality save must not disturb unrelated config (embeddings /
-        // persistence) — those stay `None` so `SetConfig` leaves them unchanged.
+    fn changes_from_touches_only_personality_not_embeddings() {
+        // A personality save must not disturb unrelated config (embeddings) -
+        // those stay `None` so `SetConfig` leaves them unchanged.
         let c = changes_from(&PersonalitySettingsView::default());
         assert!(c.embeddings_connector.is_none());
         assert!(c.embeddings_model.is_none());
         assert!(c.embeddings_base_url.is_none());
-        assert!(c.persistence_enabled.is_none());
-        assert!(c.persistence_remote_url.is_none());
-        assert!(c.persistence_remote_name.is_none());
-        assert!(c.persistence_push_on_update.is_none());
     }
 
     #[test]
@@ -389,7 +385,6 @@ mod tests {
         assert!(json.contains("personality_professionalism"), "json: {json}");
         assert!(json.contains("personality_pretentiousness"), "json: {json}");
         assert!(!json.contains("embeddings"), "json: {json}");
-        assert!(!json.contains("persistence"), "json: {json}");
     }
 
     #[test]

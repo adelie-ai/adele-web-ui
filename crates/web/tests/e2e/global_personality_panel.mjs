@@ -47,14 +47,13 @@ const personality = {
 };
 
 const reply = (id, result) => JSON.stringify({ result: { id, result } });
-// A complete `Config` view: embeddings + persistence are required (no serde
-// defaults), so the client can only deserialize `CommandResult::Config` if they
-// are present — mirror the daemon's real shape.
+// A complete `Config` view: embeddings is required (no serde default), so the
+// client can only deserialize `CommandResult::Config` if it is present - mirror
+// the daemon's real shape.
 const configResult = (id) =>
   reply(id, {
     config: {
       embeddings: { connector: '', model: '', base_url: '', has_api_key: false, available: false, is_default: false },
-      persistence: { enabled: false, remote_url: '', remote_name: '', push_on_update: false },
       personality: { ...personality },
     },
   });
