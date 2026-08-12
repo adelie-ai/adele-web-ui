@@ -63,15 +63,6 @@ pub fn command_kind(cmd: &api::Command) -> &'static str {
         api::Command::DeleteKnowledgeEntry { .. } => "DeleteKnowledgeEntry",
         api::Command::GetKnowledgeTrashCount => "GetKnowledgeTrashCount",
         api::Command::EmptyKnowledgeTrash => "EmptyKnowledgeTrash",
-        // Restored, and expected to be short-lived. adelie-ai/desktop-assistant#1275
-        // removes these two variants from the shared `Command` enum, and #114 here
-        // dropped their arms in anticipation - but #1275 has not landed, so the
-        // variants still exist and this exhaustive match no longer compiles. That
-        // left `main` red and no web-ui image buildable at all.
-        //
-        // Delete these two lines in the same change that merges #1275, not before.
-        api::Command::GetPersistenceSettings => "GetPersistenceSettings",
-        api::Command::SetPersistenceSettings { .. } => "SetPersistenceSettings",
         api::Command::ListSkills { .. } => "ListSkills",
         api::Command::SetSkillApproval { .. } => "SetSkillApproval",
         api::Command::StartKnowledgeMaintenance { .. } => "StartKnowledgeMaintenance",
