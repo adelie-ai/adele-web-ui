@@ -357,6 +357,7 @@ dependencies = [
  "desktop-assistant-api-model",
  "desktop-assistant-auth-jwt",
  "desktop-assistant-core",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

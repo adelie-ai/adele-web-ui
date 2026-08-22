@@ -55,6 +55,8 @@ pub fn command_kind(cmd: &api::Command) -> &'static str {
         api::Command::GetPurposes => "GetPurposes",
         api::Command::SetPurpose { .. } => "SetPurpose",
         api::Command::GetToolUsage { .. } => "GetToolUsage",
+        api::Command::ListContextBreakdowns { .. } => "ListContextBreakdowns",
+        api::Command::GetContextBreakdown { .. } => "GetContextBreakdown",
         api::Command::ListKnowledgeEntries { .. } => "ListKnowledgeEntries",
         api::Command::GetKnowledgeEntry { .. } => "GetKnowledgeEntry",
         api::Command::SearchKnowledgeEntries { .. } => "SearchKnowledgeEntries",
