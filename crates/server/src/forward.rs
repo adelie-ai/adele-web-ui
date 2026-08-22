@@ -465,6 +465,7 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             idempotency_key: None,
+            content_total_bytes: None,
         }
     }
 
@@ -477,6 +478,8 @@ mod tests {
             model_selection: None,
             conversation_personality: None,
             tool_gate_disabled: false,
+            omitted_leading_messages: 0,
+            title_total_bytes: None,
         }
     }
 
